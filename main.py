@@ -73,7 +73,10 @@ def step_sync() -> None:
     log.info("=" * 60)
     mod = importlib.import_module("garmin_to_csv")
     if hasattr(mod, "main"):
-        mod.main()
+        try:
+            mod.main()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Garmin sync raised an unexpected error: {exc}. Continuing pipeline.")
     else:
         log.warning("garmin_to_csv.main() not found – skipping sync.")
 

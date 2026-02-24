@@ -150,16 +150,33 @@ def append_or_update_csv(csv_path: str, data: List[Dict[str, Any]]) -> None:
         pd.DataFrame(data).to_csv(csv_path, index=False)
 
 
+# Placeholder values that signal credentials are not configured
+_CREDENTIAL_PLACEHOLDERS = {
+    "",
+    "your_email@example.com",
+    "your_password",
+    "your_email",
+    "example@example.com",
+}
+
+
 def load_credentials():
-    """Načte přihlašovací údaje z .env souboru."""
+    """Načte přihlašovací údaje z .env souboru.
+
+    Returns:
+        Tuple (email, password, display_name), or (None, None, None) when
+        credentials are absent or contain placeholder values.
+    """
     load_dotenv()
 
-    email = os.getenv("GARMIN_EMAIL")
-    password = os.getenv("GARMIN_PASSWORD")
+    email = os.getenv("GARMIN_EMAIL") or ""
+    password = os.getenv("GARMIN_PASSWORD") or ""
 
-    if not all([email, password]):
-        logger.error("[ERROR] Chybí přihlašovací údaje v .env souboru (GARMIN_EMAIL, GARMIN_PASSWORD)")
-        sys.exit(1)
+    if not email or not password:
+        return None, None, None
+
+    if email.lower() in _CREDENTIAL_PLACEHOLDERS or password.lower() in _CREDENTIAL_PLACEHOLDERS:
+        return None, None, None
 
     # display_name se nadále nepoužívá – garminconnect ho získá automaticky po přihlášení
     display_name = os.getenv("GARMIN_DISPLAY_NAME", "")
@@ -275,7 +292,7 @@ def authenticate(email: str, password: str) -> Garmin:
         return api
     except Exception as e:
         logger.error(f"[ERROR] Přihlášení selhalo: {e}", exc_info=True)
-        sys.exit(1)
+        raise RuntimeError(f"Garmin authentication failed: {e}") from e
 
 
 def sync_activities(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
@@ -1256,8 +1273,17 @@ def main():
     # 2. Načti přihlašovací údaje z .env
     email, password, _ = load_credentials()
 
-    # 3. Ověření se do Garmin Connect
-    garmin_obj = authenticate(email, password)
+    # Přímá kontrola: pokud jsou credentials prázdné, přeskoč sync a pokračuj v pipeline
+    if not email or not password:
+        logger.info("ℹ️  Garmin credentials missing. Skipping cloud sync.")
+        return
+
+    # 3. Ověření se do Garmin Connect – pokud selže, pokračuj s lokálními soubory
+    try:
+        garmin_obj = authenticate(email, password)
+    except Exception as auth_err:
+        logger.warning(f"[WARN] Garmin login failed: {auth_err}. Skipping cloud sync and continuing pipeline.")
+        return
 
     # 4. Vypočítej datumový rozsah pro stahování (Incremental Sync)
     end_date = datetime.now()
