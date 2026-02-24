@@ -1,0 +1,28 @@
+# ============================================================
+# Garmin Training Analytics – Python Dependencies
+# ============================================================
+# Install: pip install -r requirements.txt
+
+# ── Core data processing ─────────────────────────────────────
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.2
+
+# ── FIT file parsing ─────────────────────────────────────────
+fitparse>=1.2.0
+
+# ── Garmin Connect API ───────────────────────────────────────
+garminconnect>=0.2.20
+garth>=0.5.0
+python-dotenv>=1.0
+
+# ── Strava integration (optional) ────────────────────────────
+stravalib>=0.10
+requests>=2.28
+
+# ── Advanced physiology (optional – DFA-alpha1, RSA) ─────────
+neurokit2>=0.2.7
+
+# ── Visualization ────────────────────────────────────────────
+matplotlib>=3.6
