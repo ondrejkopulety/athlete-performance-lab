@@ -43,7 +43,70 @@ garmin/
 
 ---
 
-## Quick Start
+## 🔑 Authentication & API Setup
+
+### Garmin Connect
+
+Garmin Connect uses a standard email/password login. Store your credentials in `.env`:
+
+```bash
+GARMIN_EMAIL=your@email.com
+GARMIN_PASSWORD=your_password
+GARMIN_DISPLAY_NAME=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx  # UUID from API responses
+```
+
+On the first run, `garmin_to_csv.py` authenticates and caches a session token in `.garminconnect/`. Subsequent runs reuse the cached token automatically.
+
+---
+
+### 🚴 Strava API (OAuth2)
+
+Strava requires an OAuth2 application. Follow these steps once:
+
+#### Step 1 – Create a Strava App
+
+1. Go to [strava.com/settings/api](https://www.strava.com/settings/api).
+2. Fill in:
+   - **Application Name** – any name (e.g. `My Training Analytics`)
+   - **Category** – `Data Importer`
+   - **Authorization Callback Domain** – `localhost`
+3. After saving, note down your **Client ID** and **Client Secret**.
+
+#### Step 2 – First-time Authorization Flow
+
+The first time you run `src/strava_original_export.py`, the script will:
+
+1. 🌐 **Print an authorization URL** in the terminal. Open it in your browser.
+2. ✅ **Authorize** the application — Strava redirects you to
+   `http://localhost/exchange_token?state=&code=YOUR_CODE&scope=...`
+3. 📋 **Copy the `code` value** from that redirect URL and paste it back into the terminal when prompted.
+4. 🔑 The script exchanges the code for tokens and **prints your `REFRESH_TOKEN`**.
+5. 💾 **Save the refresh token** to your `.env` file (see Step 3 below).
+
+> The refresh token does **not** expire unless you explicitly revoke app access
+> in Strava settings. On all subsequent runs the script uses it silently — no
+> browser interaction needed.
+
+#### Step 3 – Update `.env`
+
+Add the following block to your `.env`:
+
+```bash
+# STRAVA API
+STRAVA_CLIENT_ID='your_client_id'
+STRAVA_CLIENT_SECRET='your_client_secret'
+STRAVA_REFRESH_TOKEN='your_token_from_first_auth'  # obtained in Step 2
+STRAVA_SESSION_COOKIE='_strava4_session=...'       # optional – only needed for raw FIT download
+```
+
+> **`STRAVA_SESSION_COOKIE`** – required to download the original `.fit` files.
+> Strava's download endpoint is authenticated by a browser session cookie, not OAuth.
+> Copy the `_strava4_session` cookie from DevTools
+> (Application → Cookies → `www.strava.com`) while logged in.
+
+---
+
+## 🚀 Quick Start
 
 ### 1. Clone & install
 
@@ -59,10 +122,21 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env and fill in:
-#   GARMIN_EMAIL=your@email.com
-#   GARMIN_PASSWORD=your_password
-#   GARMIN_DISPLAY_NAME=your-uuid
+```
+
+Then edit `.env` and fill in all credentials (see [Authentication & API Setup](#-authentication--api-setup) above):
+
+```bash
+# Garmin Connect
+GARMIN_EMAIL=your@email.com
+GARMIN_PASSWORD=your_password
+GARMIN_DISPLAY_NAME=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+# Strava API
+STRAVA_CLIENT_ID='your_client_id'
+STRAVA_CLIENT_SECRET='your_client_secret'
+STRAVA_REFRESH_TOKEN='your_token_from_first_auth'
+STRAVA_SESSION_COOKIE='_strava4_session=...'
 ```
 
 ### 3. Configure athlete profile
