@@ -309,16 +309,16 @@ def collect_fit_files() -> tuple[list[dict], int, int]:
 
     all_files: list[tuple] = []  # (path, source, file_size, mtime)
 
-    # Garmin: jen soubory přímo v data/fit/ (NE v podsložkách)
-    garmin_pattern = os.path.join(GARMIN_FIT_FOLDER, "*.fit")
-    garmin_files = sorted(glob.glob(garmin_pattern))
+    # Garmin: rekurzivně všechny .fit soubory v data/fit/ včetně podsložek
+    garmin_pattern = os.path.join(GARMIN_FIT_FOLDER, "**", "*.fit")
+    garmin_files = sorted(glob.glob(garmin_pattern, recursive=True))
     log.info("Garmin složka: %d FIT souborů", len(garmin_files))
     for fp in garmin_files:
         all_files.append((fp, SOURCE_GARMIN, os.path.getsize(fp), os.path.getmtime(fp)))
 
-    # Strava originals
-    strava_pattern = os.path.join(STRAVA_FIT_FOLDER, "*.fit")
-    strava_files = sorted(glob.glob(strava_pattern))
+    # Strava originals (rekurzivně)
+    strava_pattern = os.path.join(STRAVA_FIT_FOLDER, "**", "*.fit")
+    strava_files = sorted(glob.glob(strava_pattern, recursive=True))
     log.info("Strava složka: %d FIT souborů", len(strava_files))
     for fp in strava_files:
         all_files.append((fp, SOURCE_STRAVA, os.path.getsize(fp), os.path.getmtime(fp)))

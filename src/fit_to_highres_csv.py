@@ -65,6 +65,7 @@ HIGHRES_COLS = [
     "distance", "altitude", "cadence", "power", "temperature",
     "vertical_oscillation", "stance_time",
     "respiratory_rate", "hrv",
+    "position_lat", "position_long", "sport",
     "is_active", "hr_zone", "trimp_increment",
 ]
 
@@ -507,6 +508,12 @@ def parse_fit_file(
         # HRV: some devices embed per-record HRV (beat-to-beat interval in ms)
         hrv_val    = _safe_float(raw.get("hrv") or raw.get("heart_rate_variability"))
 
+        # GPS coordinates (Garmin stores as semicircles → convert to degrees)
+        raw_lat = raw.get("position_lat")
+        raw_lon = raw.get("position_long")
+        lat_deg = raw_lat * (180.0 / (2**31)) if raw_lat is not None else None
+        lon_deg = raw_lon * (180.0 / (2**31)) if raw_lon is not None else None
+
         # Zone must be computed before is_active so the HR-zone fallback works.
         zone = classify_zone(hr, zones)
         # A record is active when:
@@ -558,6 +565,9 @@ def parse_fit_file(
             "stance_time":     f"{stance_t:.1f}" if stance_t is not None else "",
             "respiratory_rate": f"{resp_rate:.1f}" if resp_rate is not None else "",
             "hrv":             f"{hrv_val:.1f}" if hrv_val is not None else "",
+            "position_lat":    f"{lat_deg:.6f}" if lat_deg is not None else "",
+            "position_long":   f"{lon_deg:.6f}" if lon_deg is not None else "",
+            "sport":           sport,
             "is_active":       is_active,
             "hr_zone":         zone,
             "trimp_increment": f"{t_inc:.5f}",
