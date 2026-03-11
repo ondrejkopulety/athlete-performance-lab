@@ -22,7 +22,6 @@ Usage
 from __future__ import annotations
 
 import argparse
-import importlib
 import logging
 import os
 import sys
@@ -71,14 +70,13 @@ def step_sync() -> None:
     log.info("=" * 60)
     log.info("STEP 1 / 4 : SYNC – Garmin Connect API download")
     log.info("=" * 60)
-    mod = importlib.import_module("garmin_to_csv")
-    if hasattr(mod, "main"):
-        try:
-            mod.main()
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"Garmin sync raised an unexpected error: {exc}. Continuing pipeline.")
-    else:
-        log.warning("garmin_to_csv.main() not found – skipping sync.")
+    try:
+        from src.garmin_to_csv import main as sync_main
+        sync_main()
+    except ImportError:
+        log.warning("garmin_to_csv not available – skipping sync.")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"Garmin sync raised an unexpected error: {exc}. Continuing pipeline.")
 
 
 def step_parse() -> None:
@@ -86,11 +84,11 @@ def step_parse() -> None:
     log.info("=" * 60)
     log.info("STEP 2 / 4 : PARSE – FIT → High-Res CSV")
     log.info("=" * 60)
-    mod = importlib.import_module("fit_to_highres_csv")
-    if hasattr(mod, "main"):
-        mod.main()
-    else:
-        log.warning("fit_to_highres_csv.main() not found – skipping parse.")
+    try:
+        from src.analytics.fit_parser import main as parse_main
+        parse_main()
+    except ImportError:
+        log.warning("fit_parser not available – skipping parse.")
 
 
 def step_merge() -> None:
@@ -98,11 +96,11 @@ def step_merge() -> None:
     log.info("=" * 60)
     log.info("STEP 3 / 4 : MERGE – Master Rebuild (deduplication)")
     log.info("=" * 60)
-    mod = importlib.import_module("master_rebuild")
-    if hasattr(mod, "main"):
-        mod.main()
-    else:
-        log.warning("master_rebuild.main() not found – skipping merge.")
+    try:
+        from src.analytics.master_rebuild import main as merge_main
+        merge_main()
+    except ImportError:
+        log.warning("master_rebuild not available – skipping merge.")
 
 
 def step_analyze() -> None:
@@ -110,11 +108,11 @@ def step_analyze() -> None:
     log.info("=" * 60)
     log.info("STEP 4 / 4 : ANALYZE – Athlete Analytics")
     log.info("=" * 60)
-    mod = importlib.import_module("athlete_analytics")
-    if hasattr(mod, "main"):
-        mod.main()
-    else:
-        log.warning("athlete_analytics.main() not found – skipping analysis.")
+    try:
+        from src.analytics.athlete_analytics import main as analyze_main
+        analyze_main()
+    except ImportError:
+        log.warning("athlete_analytics not available – skipping analysis.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

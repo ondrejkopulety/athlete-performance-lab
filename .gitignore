@@ -24,17 +24,26 @@ data/raw/
 data/processed/
 data/fit/
 data/summaries/
+data/Apple/
 *.fit
 *.csv
+
+# Keep directory structure via .gitkeep placeholders
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/fit/.gitkeep
+!data/summaries/.gitkeep
 
 # ---------- REPORTS (Generated outputs) ----------
 reports/*.png
 reports/*.pdf
 reports/*.html
+!reports/.gitkeep
 
 # ---------- LOGS ----------
 logs/
 *.log
+!logs/.gitkeep
 
 # ---------- OS & IDE ----------
 .DS_Store
