@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR        = PROJECT_ROOT / "data"
 RAW_DIR         = DATA_DIR / "raw"
 FIT_DIR         = DATA_DIR / "fit"
+STRAVA_FIT_DIR  = FIT_DIR / "strava_originals"
 SUMMARIES_DIR   = DATA_DIR / "summaries"
 PROCESSED_DIR   = DATA_DIR / "processed"
 REPORTS_DIR     = PROJECT_ROOT / "reports"
@@ -127,3 +128,56 @@ CSV_MASTER_TRAINING        = "master_high_res_training_data.csv"
 CSV_MASTER_SUMMARY         = "master_high_res_summary.csv"
 CSV_ATHLETE_READINESS      = "athlete_readiness.csv"
 CSV_METADATA_CACHE         = "metadata_cache.json"
+
+# ============================================================
+# BOTANICAL STOP ANALYSIS  –  Single Source of Truth
+# ============================================================
+
+# Minimum Confidence Score for a stop to appear in ANY pipeline output
+# (green_stops_report.csv, botanical_hotspots_ranked.csv, performance CSV, map).
+# Change here to adjust the filter universally.
+MIN_CONFIDENCE_THRESHOLD: float  = 15.0
+
+# DBSCAN clustering radius – stops within this distance merge into one hotspot.
+# Used by detect_botanical_hotspots.py; defined here so both the mapper and
+# any future scripts share an identical value.
+CLUSTER_RADIUS_M: int            = 300
+
+# A GPS speed below this threshold means the rider is "stopped"
+STOP_SPEED_THRESHOLD_KMH: float  = 2.0
+
+# A stop must last at least this many seconds to be analysed
+MIN_STOP_DURATION_S: int         = 600         # 10 minutes
+
+# Consecutive "stopped" rows can be separated by at most this many seconds
+# (bridges Auto-Pause / Smart-Recording gaps) and still count as one stop
+MAX_AUTO_PAUSE_GAP_SEC: int      = 900         # 15 minutes
+
+# Length of pre/post-stop analysis window for physiological markers
+ANALYSIS_WINDOW_S: int           = 15 * 60     # 15 minutes
+
+# HR settle window used at start/end of each stop for Marker A
+HR_SETTLE_WINDOW_S: int          = 3 * 60      # 3 minutes
+
+# Set False to skip exclusion-zone filtering for quick / offline runs
+ENABLE_EXCLUSION_ZONES: bool     = True
+
+# Locations to completely exclude from all outputs (home, work, known false-positives).
+# Format:  "Label": (latitude, longitude, radius_metres)
+# Edit coordinates to your real locations; add/remove entries freely.
+EXCLUDED_LOCATIONS: dict[str, tuple[float, float, float]] = {
+    "Ignored_Spot_1": (49.2099417, 16.1466983, 200),
+    "Ignored_Spot_2": (49.2061342, 16.1556133, 200),
+    "Ignored_Spot_3": (49.2127633, 16.1470508, 200),
+    "Ignored_Spot_4": (49.1540772, 16.0799922, 200),
+}
+
+# Sports considered "cardio" (cycling + running variants).
+# Used to filter activities before stop-detection in all three pipeline scripts.
+CARDIO_SPORTS: frozenset[str] = frozenset({
+    "cycling", "gravel_cycling", "mountain_biking",
+    "road_cycling", "indoor_cycling", "virtual_cycling",
+    "e_bike", "bmx", "cyclocross", "track_cycling",
+    "running", "trail_running", "treadmill_running",
+    "track_running", "ultra_running",
+})
