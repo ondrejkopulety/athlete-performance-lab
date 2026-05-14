@@ -26,13 +26,12 @@ from pathlib import Path
 from typing import Optional, Dict, List, Any
 
 # ── Project root on sys.path for config import ────────────────────────────────
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 import pandas as pd
 import requests.exceptions
-import garth.exc
 from garminconnect import (
     Garmin,
     GarminConnectTooManyRequestsError,
@@ -115,15 +114,19 @@ _RATE_LIMIT_EXCEPTIONS = (
     GarminConnectTooManyRequestsError,
 )
 
-# HTTP status codes worth retrying (server errors + rate limit)
-_RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
+# HTTP status codes worth retrying (server errors only; 429 is FATAL)
+_RETRYABLE_HTTP_CODES = {500, 502, 503, 504}
 
 # Backoff delays in seconds: 1st retry = 30s, 2nd = 120s, 3rd = 300s
 _BACKOFF_DELAYS = [30, 120, 300]
 
 
 class GarminRateLimitError(Exception):
-    """Raised when Garmin API rate limit is exhausted after all retries."""
+    """Raised when Garmin API rate limit is exhausted after all retries.
+
+    This is a FATAL error – the script must terminate immediately to avoid
+    further hammering the Garmin API and escalating the cooldown window.
+    """
     pass
 
 
@@ -134,12 +137,6 @@ class GarminNotFoundError(Exception):
 
 def _extract_http_status(exc: Exception) -> int | None:
     """Try to extract an HTTP status code from various exception types."""
-    # garth.exc.GarthHTTPError → .error is requests.HTTPError
-    if isinstance(exc, garth.exc.GarthHTTPError):
-        inner = getattr(exc, "error", None)
-        resp = getattr(inner, "response", None)
-        if resp is not None:
-            return getattr(resp, "status_code", None)
     # requests.exceptions.HTTPError → .response.status_code
     if isinstance(exc, requests.exceptions.HTTPError):
         resp = getattr(exc, "response", None)
@@ -154,17 +151,25 @@ def _extract_http_status(exc: Exception) -> int | None:
 
 
 def _is_retryable(exc: Exception) -> bool:
-    """Return True if the exception warrants a retry with backoff."""
+    """Return True if the exception warrants a retry with backoff.
+
+    NOTE: HTTP 429 is NOT retryable – it is fatal. See _is_hard_429().
+    """
     # Pure network / timeout errors are always retryable
-    if isinstance(exc, _RATE_LIMIT_EXCEPTIONS):
+    if isinstance(exc, (ConnectionResetError, TimeoutError,
+                        requests.exceptions.ReadTimeout,
+                        requests.exceptions.ConnectionError)):
         return True
-    # HTTP errors: retry only on specific status codes
+    # GarminConnectTooManyRequestsError is 429 → NOT retryable (fatal)
+    if isinstance(exc, GarminConnectTooManyRequestsError):
+        return False
+    # HTTP errors: retry only on specific status codes (5xx)
     status = _extract_http_status(exc)
     if status is not None:
         return status in _RETRYABLE_HTTP_CODES
-    # Fallback: check message for known patterns
+    # Fallback: check message for known timeout patterns (but NOT 429)
     err_str = str(exc).lower()
-    return "429" in err_str or "too many requests" in err_str
+    return "timeout" in err_str or "connection" in err_str
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -172,12 +177,22 @@ def _is_not_found(exc: Exception) -> bool:
     return _extract_http_status(exc) == 404
 
 
+def _is_hard_429(exc: Exception) -> bool:
+    """Return True if the exception is a definitive HTTP 429 (not a timeout)."""
+    if isinstance(exc, GarminConnectTooManyRequestsError):
+        return True
+    status = _extract_http_status(exc)
+    return status == 429
+
+
 def polite_api_call(api_fn, *args, metric_name="unknown", **kwargs):
     """
     Wrapper for Garmin API calls with exponential backoff.
 
     - 404 errors → raises GarminNotFoundError immediately (no retry).
-    - Retryable errors (429, 5xx, timeouts) → retry with backoff.
+    - Hard 429 (Too Many Requests) → raises GarminRateLimitError immediately.
+      The caller / main() must catch this and terminate the script.
+    - Other retryable errors (5xx, timeouts) → retry with backoff.
     - Other errors → re-raised immediately.
     """
     last_exception = None
@@ -190,15 +205,19 @@ def polite_api_call(api_fn, *args, metric_name="unknown", **kwargs):
             raise GarminNotFoundError(
                 f"Metrika {metric_name} nenalezena (HTTP 404)"
             ) from e
+        if _is_hard_429(e):
+            raise GarminRateLimitError(
+                f"Rate limit hit (HTTP 429) u metriky {metric_name}. Wait 60 min."
+            ) from e
         if _is_retryable(e):
             last_exception = e
         else:
             raise
 
-    # Retry with backoff
+    # Retry with backoff (only for 5xx / timeouts – NOT 429)
     for attempt, delay in enumerate(_BACKOFF_DELAYS, 1):
         logger.warning(
-            f"[RATE LIMIT] {metric_name}: pokus {attempt}/{len(_BACKOFF_DELAYS)}, "
+            f"[RETRY] {metric_name}: pokus {attempt}/{len(_BACKOFF_DELAYS)}, "
             f"chyba: {type(last_exception).__name__}. Čekám {delay}s..."
         )
         time.sleep(delay)
@@ -208,6 +227,10 @@ def polite_api_call(api_fn, *args, metric_name="unknown", **kwargs):
             if _is_not_found(e):
                 raise GarminNotFoundError(
                     f"Metrika {metric_name} nenalezena (HTTP 404)"
+                ) from e
+            if _is_hard_429(e):
+                raise GarminRateLimitError(
+                    f"Rate limit hit (HTTP 429) u metriky {metric_name}. Wait 60 min."
                 ) from e
             if _is_retryable(e):
                 last_exception = e
@@ -219,46 +242,64 @@ def polite_api_call(api_fn, *args, metric_name="unknown", **kwargs):
     ) from last_exception
 
 
+# CSV soubory, kde deduplikace podle 'date' dává smysl (jedna hodnota na den)
+_DATE_DEDUP_FILES = {"sleep", "hrv", "daily_health"}
+
+
+def _choose_dedup_subset(df: pd.DataFrame, csv_path: Path) -> list[str] | None:
+    """
+    Dynamicky zvolí klíč pro deduplikaci:
+      1) activity_id – pro soubory s jednotlivými aktivitami
+      2) timestamp   – pro soubory s více záznamy denně (heart_rate_details apod.)
+      3) date        – fallback pro agregované denní metriky (sleep, hrv, daily_health)
+    """
+    if 'activity_id' in df.columns:
+        return ['activity_id']
+    if 'timestamp' in df.columns:
+        return ['timestamp']
+    if 'date' in df.columns:
+        return ['date']
+    return None
+
+
 def append_or_update_csv(csv_path: str, data: List[Dict[str, Any]]) -> None:
     """
     Přidá nebo aktualizuje CSV soubor.
-    
-    Pokud soubor existuje, sloučí nová data se starými a odstraní duplicity
-    podle sloupce 'date'. Novější data přepíší starší.
-    
+
+    Deduplikace je dynamická:
+      - activity_id / timestamp → zachová více záznamů na den (dvoufázové tréninky).
+      - date → fallback pro denní agregáty (sleep, hrv, daily_health).
+
     Args:
         csv_path: Cesta k CSV souboru
         data: Seznam slovníků reprezentujících řádky
     """
     if not data:
         return
-    
+
     csv_path = Path(csv_path)
-    
+
     # Pokud soubor existuje, načti jeho obsah
     if csv_path.exists():
         try:
             df_existing = pd.read_csv(csv_path)
             df_new = pd.DataFrame(data)
-            
-            # Sloučení - nová data mají přednost
-            # Používáme 'date' jako klíč pro deduplikaci
-            if 'date' in df_existing.columns and 'date' in df_new.columns:
-                # Znormalizuj datumové sloupce
-                df_existing['date'] = pd.to_datetime(df_existing['date'])
-                df_new['date'] = pd.to_datetime(df_new['date'])
-                
-                # Odstraň staré řádky, které jsou v nových datech
-                df_merged = pd.concat([df_existing, df_new], ignore_index=True)
-                df_merged = df_merged.drop_duplicates(subset=['date'], keep='last')
+
+            df_merged = pd.concat([df_existing, df_new], ignore_index=True)
+
+            dedup_subset = _choose_dedup_subset(df_merged, csv_path)
+            if dedup_subset:
+                # Normalizuj date sloupec, pokud je součástí klíče
+                if 'date' in dedup_subset:
+                    df_merged['date'] = pd.to_datetime(df_merged['date'])
+                df_merged = df_merged.drop_duplicates(subset=dedup_subset, keep='last')
+
+            # Seřad podle date, pokud existuje
+            if 'date' in df_merged.columns:
+                df_merged['date'] = pd.to_datetime(df_merged['date'])
                 df_merged = df_merged.sort_values('date')
-                
-                # Konvertuj zpět na string, pokud to bylo původně
                 df_merged['date'] = df_merged['date'].astype(str)
-            else:
-                # Pokud není 'date' sloupec, prostě přidej nová data
-                df_merged = pd.concat([df_existing, pd.DataFrame(data)], ignore_index=True)
-            
+
             df_merged.to_csv(csv_path, index=False)
         except Exception as e:
             logger.warning(f"[WARN] Chyba při slučování CSV {csv_path}: {e}")
@@ -374,47 +415,39 @@ TOKEN_STORE = ".garminconnect"
 
 def authenticate(email: str, password: str) -> Garmin:
     """
-    Ověření se Garmin Connect API s persistencí tokenů (kompatibilní s garminconnect v0.2.x).
+    Ověření se Garmin Connect API výhradně pomocí lokálně uložených tokenů.
 
-    Nejdříve se pokusí načíst uloženou session z TOKEN_STORE adresáře.
-    Pokud selže (tokeny chybí nebo vypršely), provede plné přihlášení a uloží
-    nové tokeny pomocí garth.save() pro příští spuštění.
+    Volá POUZE api.login(TOKEN_STORE). Žádné záložní mechanismy
+    (garth.refresh_oauth2, čisté api.login()) nejsou povoleny – každý
+    neautorizovaný síťový pokus riskuje HTTP 429 a prodloužený ban.
+
+    Pokud tokeny chybí nebo jsou neplatné, skript zaloguje FATAL chybu
+    a okamžitě se ukončí (sys.exit(1)).
     """
-    logger.info("[INFO] Ověřuji se do Garmin Connect...")
+    logger.info("[INFO] Ověřuji se do Garmin Connect (pouze lokální tokeny)...")
 
-    token_dir = Path(TOKEN_STORE)
+    api = Garmin(email, password)
 
-    # Pokus 1: Obnova session z uložených tokenů (bez nového přihlašování)
-    if token_dir.exists():
-        try:
-            logger.info(f"[INFO] Zkouším načíst session z {TOKEN_STORE}...")
-            api = Garmin(email, password)
-            api.garth.load(TOKEN_STORE)
-            # Ověř platnost session dotazem na display_name
-            _ = api.display_name
-            logger.info("[INFO] Session úspěšně obnovena z uložených tokenů")
-            return api
-        except Exception as token_err:
-            logger.info(f"[INFO] Uložená session je neplatná ({type(token_err).__name__}), provádím nové přihlášení...")
-
-    # Pokus 2: Plné přihlášení s uložením tokenů pro příště
     try:
-        api = Garmin(email, password)
-        api.login()
-        try:
-            token_dir.mkdir(parents=True, exist_ok=True)
-            api.garth.save(TOKEN_STORE)
-            logger.info(f"[INFO] Tokeny uloženy do {TOKEN_STORE} pro příští spuštění")
-        except Exception as save_err:
-            logger.warning(f"[WARN] Nepodařilo se uložit tokeny: {save_err}")
-        logger.info(f"[INFO] Přihlášení úspěšné (display_name={api.display_name})")
+        api.login(TOKEN_STORE)
+        logger.info("[INFO] Session úspěšně obnovena z uložených tokenů")
         return api
     except Exception as e:
-        logger.error(f"[ERROR] Přihlášení selhalo: {e}", exc_info=True)
-        raise RuntimeError(f"Garmin authentication failed: {e}") from e
+        logger.error(
+            f"[FATAL] Nepodařilo se přihlásit pomocí lokálních tokenů: {e}\n"
+            f"  → Tokeny v {TOKEN_STORE}/ jsou neplatné nebo chybí.\n"
+            f"  → Spusť seed_token.py pro vygenerování nových tokenů.\n"
+            f"  → Skript se ukončuje, aby nedošlo k dalším síťovým pokusům."
+        )
+        sys.exit(1)
 
 
-def sync_activities(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
+def sync_activities(
+    garmin_obj: Garmin,
+    start_date: str,
+    end_date: str,
+    force_redownload_ids: Optional[List] = None,
+) -> None:
     """
     Synchronizuje aktivitní data pomocí garmin_obj.get_activities_by_date().
 
@@ -422,7 +455,10 @@ def sync_activities(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         garmin_obj: Přihlášený objekt Garmin
         start_date: Počáteční datum (YYYY-MM-DD)
         end_date: Konečné datum (YYYY-MM-DD)
+        force_redownload_ids: Seznam activity_id pro vynucené stažení FIT souborů
     """
+    if force_redownload_ids is None:
+        force_redownload_ids = []
     logger.info(f"[INFO] Synchronizuji AKTIVITY pro datumový rozsah {start_date} až {end_date}...")
 
     try:
@@ -436,9 +472,20 @@ def sync_activities(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
 
         if activities and isinstance(activities, list):
             for activity in activities:
-                # get_activities_by_date vrací startTimeLocal jako "YYYY-MM-DD HH:MM:SS"
+                # Sjednocení na UTC: Garmin API vrací startTimeGMT (UTC)
+                # i startTimeLocal. Pro konzistenci s FIT parserem (UTC)
+                # odvozujeme date z UTC, aby aktivity kolem půlnoci
+                # neměly v různých tabulkách různá data.
+                start_time_gmt = activity.get("startTimeGMT", "")
                 start_time_local = activity.get("startTimeLocal", "")
-                activity_date_str = start_time_local[:10] if start_time_local else ""
+
+                # Primárně date z UTC; fallback na local
+                if start_time_gmt:
+                    activity_date_str = start_time_gmt[:10]
+                elif start_time_local:
+                    activity_date_str = start_time_local[:10]
+                else:
+                    activity_date_str = ""
 
                 if not activity_date_str:
                     continue
@@ -456,39 +503,92 @@ def sync_activities(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
                     "avg_heart_rate": activity.get("averageHR", 0),
                     "max_heart_rate": activity.get("maxHR", 0),
                     "start_time": start_time_local,
+                    "start_time_utc": start_time_gmt,
+                    "epoc_load": activity.get("trainingLoad", 0.0),
+                    "aerobic_te": activity.get("aerobicTrainingEffect", 0.0),
+                    "anaerobic_te": activity.get("anaerobicTrainingEffect", 0.0),
                 })
 
                 # Pokus se stáhnout a rozbalit FIT soubor
-                try:
-                    fit_data = polite_api_call(
-                        garmin_obj.download_activity,
-                        activity_id, dl_fmt=garmin_obj.ActivityDownloadFormat.ORIGINAL,
-                        metric_name="FIT DOWNLOAD"
-                    )
-                    if fit_data:
-                        if zipfile.is_zipfile(io.BytesIO(fit_data)):
-                            # Rozbal ZIP v paměti, ulož pouze .fit soubory
-                            with zipfile.ZipFile(io.BytesIO(fit_data)) as zf:
-                                for name in zf.namelist():
-                                    if name.lower().endswith(".fit"):
-                                        fit_path = FIT_DIR / f"activity_{activity_id}.fit"
-                                        fit_path.write_bytes(zf.read(name))
-                                        fit_count += 1
-                        else:
-                            # Stažená data jsou přímo FIT soubor
-                            fit_path = FIT_DIR / f"activity_{activity_id}.fit"
-                            fit_path.write_bytes(fit_data)
-                            fit_count += 1
-                except GarminNotFoundError:
-                    pass  # FIT not available for this activity
-                except GarminRateLimitError:
-                    logger.warning(
-                        f"[RATE LIMIT] Garmin API nás odřízlo při stahování FIT souborů. "
-                        f"Staženo {fit_count} souborů. Metadata aktivit budou uložena."
-                    )
-                    break
-                except Exception as e:
-                    logger.warning(f"[WARN] FIT soubor pro aktivitu {activity_id}: {str(e)[:50]}")
+                fit_path = FIT_DIR / f"activity_{activity_id}.fit"
+                _force_this = activity_id in force_redownload_ids
+                if fit_path.exists() and not _force_this:
+                    logger.debug(f"[DEBUG] FIT soubor už existuje, přeskakuji stahování: {fit_path}")
+                else:
+                    if _force_this and fit_path.exists():
+                        logger.info(f"[REDOWNLOAD] Vynucené opětovné stažení FIT pro {activity_id}")
+                    # Retry mechanismus pro Garmin processing lag:
+                    # nový FIT soubor nemusí být ihned k dispozici po doběhu.
+                    _FIT_RETRY_DELAY = 30   # sekund
+                    _FIT_MAX_RETRIES = 3
+                    fit_downloaded = False
+
+                    for _fit_attempt in range(1, _FIT_MAX_RETRIES + 1):
+                        try:
+                            fit_data = polite_api_call(
+                                garmin_obj.download_activity,
+                                activity_id, dl_fmt=garmin_obj.ActivityDownloadFormat.ORIGINAL,
+                                metric_name="FIT DOWNLOAD"
+                            )
+                            if fit_data and len(fit_data) > 0:
+                                if zipfile.is_zipfile(io.BytesIO(fit_data)):
+                                    with zipfile.ZipFile(io.BytesIO(fit_data)) as zf:
+                                        for name in zf.namelist():
+                                            if name.lower().endswith(".fit"):
+                                                fit_path.write_bytes(zf.read(name))
+                                                fit_count += 1
+                                                fit_downloaded = True
+                                else:
+                                    fit_path.write_bytes(fit_data)
+                                    fit_count += 1
+                                    fit_downloaded = True
+                                break  # úspěch → konec retry smyčky
+                            else:
+                                # Prázdná data – Garmin ještě nezpracoval FIT
+                                if _fit_attempt < _FIT_MAX_RETRIES:
+                                    logger.info(
+                                        f"[RETRY] FIT pro {activity_id}: prázdná odpověď, "
+                                        f"pokus {_fit_attempt}/{_FIT_MAX_RETRIES}. "
+                                        f"Čekám {_FIT_RETRY_DELAY}s (Garmin processing lag)..."
+                                    )
+                                    time.sleep(_FIT_RETRY_DELAY)
+                                else:
+                                    logger.warning(
+                                        f"[WARN] FIT pro {activity_id}: prázdná odpověď "
+                                        f"i po {_FIT_MAX_RETRIES} pokusech. Přeskakuji."
+                                    )
+                        except GarminNotFoundError:
+                            # FIT ještě neexistuje na API – retry
+                            if _fit_attempt < _FIT_MAX_RETRIES:
+                                logger.info(
+                                    f"[RETRY] FIT pro {activity_id}: 404, "
+                                    f"pokus {_fit_attempt}/{_FIT_MAX_RETRIES}. "
+                                    f"Čekám {_FIT_RETRY_DELAY}s..."
+                                )
+                                time.sleep(_FIT_RETRY_DELAY)
+                            else:
+                                logger.debug(
+                                    f"[DEBUG] FIT pro {activity_id}: 404 i po "
+                                    f"{_FIT_MAX_RETRIES} pokusech."
+                                )
+                            continue
+                        except GarminRateLimitError:
+                            logger.warning(
+                                f"[RATE LIMIT] FIT download pro {activity_id}: "
+                                f"rate limit – ukládám dosavadní data a ukončuji."
+                            )
+                            if activities_data:
+                                append_or_update_csv(CSV_FILES["activities"], activities_data)
+                                logger.info(f"[PARTIAL] Uloženo {len(activities_data)} aktivit před ukončením.")
+                            raise
+                        except Exception as e:
+                            logger.warning(
+                                f"[WARN] FIT pro {activity_id} "
+                                f"(pokus {_fit_attempt}): {str(e)[:80]}"
+                            )
+                            if _fit_attempt < _FIT_MAX_RETRIES:
+                                time.sleep(_FIT_RETRY_DELAY)
+                            break
 
                 logger.info(f"[INFO] Synchronizuji AKTIVITU pro datum {activity_date_str}")
                 random_sleep()
@@ -499,6 +599,8 @@ def sync_activities(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         else:
             logger.info("[INFO] Žádné aktivity k synchronizaci")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci aktivit: {e}")
 
@@ -550,9 +652,11 @@ def sync_hrv(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky HRV. "
-                    f"Uloženo {len(hrv_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(hrv_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if hrv_data:
+                    append_or_update_csv(CSV_FILES["hrv"], hrv_data)
+                raise
             except Exception as e:
                 logger.warning(f"[WARN] Chyba při stahování HRV pro {date_str}: {str(e)[:50]}")
 
@@ -564,6 +668,8 @@ def sync_hrv(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         else:
             logger.info("[INFO] Žádná HRV data k synchronizaci")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci HRV: {e}")
 
@@ -628,9 +734,11 @@ def sync_vo2_max(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky VO2 MAX. "
-                    f"Uloženo {len(vo2_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(vo2_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if vo2_data:
+                    append_or_update_csv(CSV_FILES["vo2_max"], vo2_data)
+                raise
             if vo2_value:
                 vo2_data.append({"date": date_str, "vo2_max": vo2_value})
                 logger.info(f"[INFO] Synchronizuji VO2 MAX pro datum {date_str}: {vo2_value}")
@@ -651,9 +759,11 @@ def sync_vo2_max(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
                 except GarminRateLimitError:
                     logger.warning(
                         f"[RATE LIMIT] Garmin API nás odřízlo u metriky VO2 MAX (fallback). "
-                        f"Uloženo {len(vo2_data)} záznamů. Další pokus zkuste za pár hodin."
+                        f"Uloženo {len(vo2_data)} záznamů. Ukončuji skript."
                     )
-                    break
+                    if vo2_data:
+                        append_or_update_csv(CSV_FILES["vo2_max"], vo2_data)
+                    raise
                 if vo2_value:
                     vo2_data.append({"date": date_str, "vo2_max": vo2_value})
                     logger.info(f"[INFO] VO2 MAX (fallback 30d) nalezen pro {date_str}: {vo2_value}")
@@ -666,6 +776,8 @@ def sync_vo2_max(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         else:
             logger.info("[INFO] VO2 Max: bez dostupných dat v API (ani za posledních 30 dní)")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci VO2 Max: {e}")
 
@@ -731,9 +843,11 @@ def sync_sleep(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky SPÁNEK. "
-                    f"Uloženo {len(sleep_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(sleep_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if sleep_data:
+                    append_or_update_csv(CSV_FILES["sleep"], sleep_data)
+                raise
             except Exception as e:
                 logger.warning(f"[WARN] Chyba při stahování spánkových dat pro {date_str}: {e}")
             
@@ -745,6 +859,8 @@ def sync_sleep(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         else:
             logger.info("[INFO] Žádná spánková data k synchronizaci")
     
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci spánku: {e}")
 
@@ -806,9 +922,11 @@ def sync_daily_health(garmin_obj: Garmin, start_date: str, end_date: str) -> Non
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky DAILY HEALTH. "
-                    f"Uloženo {len(health_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(health_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if health_data:
+                    append_or_update_csv(CSV_FILES["daily_health"], health_data)
+                raise
             except Exception as e:
                 logger.debug(f"[DEBUG] Chyba při Daily Health pro {date_str}: {str(e)[:50]}")
 
@@ -820,6 +938,8 @@ def sync_daily_health(garmin_obj: Garmin, start_date: str, end_date: str) -> Non
         else:
             logger.info("[INFO] Daily Health: bez dostupných dat v API")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci daily health: {e}")
 
@@ -897,9 +1017,11 @@ def sync_training_readiness(garmin_obj: Garmin, start_date: str, end_date: str) 
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky TRAINING READINESS. "
-                    f"Uloženo {len(readiness_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(readiness_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if readiness_data:
+                    append_or_update_csv(CSV_FILES["training_readiness"], readiness_data)
+                raise
             except Exception as e:
                 logger.debug(f"[DEBUG] Chyba při stahování Training Readiness pro {date_str}: {str(e)[:100]}")
 
@@ -911,6 +1033,8 @@ def sync_training_readiness(garmin_obj: Garmin, start_date: str, end_date: str) 
         else:
             logger.info("[INFO] Training Readiness: bez dostupných dat v API")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci training readiness: {e}")
 
@@ -998,9 +1122,11 @@ def sync_training_status_history(garmin_obj: Garmin, start_date: str, end_date: 
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky TRAINING STATUS HISTORY. "
-                    f"Uloženo {len(status_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(status_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if status_data:
+                    append_or_update_csv(CSV_FILES["training_status"], status_data)
+                raise
             except Exception as e:
                 logger.debug(f"[DEBUG] Chyba při Training Status History pro {date_str}: {str(e)[:100]}")
 
@@ -1014,6 +1140,8 @@ def sync_training_status_history(garmin_obj: Garmin, start_date: str, end_date: 
         else:
             logger.info("[INFO] Training Status History: bez smysluplných dat v API")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci training status history: {e}")
 
@@ -1082,9 +1210,11 @@ def sync_load_focus(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky LOAD FOCUS. "
-                    f"Uloženo {len(load_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(load_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if load_data:
+                    append_or_update_csv(CSV_FILES["load_focus"], load_data)
+                raise
             except Exception as e:
                 logger.debug(f"[DEBUG] Chyba při stahování load focus pro {date_str}: {str(e)[:100]}")
 
@@ -1096,6 +1226,8 @@ def sync_load_focus(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         else:
             logger.info("[INFO] Load Focus: bez dostupných dat v API")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci load focus: {e}")
 
@@ -1162,8 +1294,11 @@ def sync_lactate_threshold(garmin_obj: Garmin, start_date: str, end_date: str) -
         except GarminRateLimitError:
             logger.warning(
                 f"[RATE LIMIT] Garmin API nás odřízlo u metriky LACTATE THRESHOLD. "
-                f"Uloženo {len(lactate_data)} záznamů. Další pokus zkuste za pár hodin."
+                f"Uloženo {len(lactate_data)} záznamů. Ukončuji skript."
             )
+            if lactate_data:
+                append_or_update_csv(CSV_FILES["lactate_threshold"], lactate_data)
+            raise
         except Exception as e:
             logger.debug(f"[DEBUG] Lactate primary endpoint failed: {str(e)[:100]}")
 
@@ -1195,9 +1330,11 @@ def sync_lactate_threshold(garmin_obj: Garmin, start_date: str, end_date: str) -
                 except GarminRateLimitError:
                     logger.warning(
                         f"[RATE LIMIT] Garmin API nás odřízlo u metriky LACTATE THRESHOLD (fallback). "
-                        f"Uloženo {len(lactate_data)} záznamů. Další pokus zkuste za pár hodin."
+                        f"Uloženo {len(lactate_data)} záznamů. Ukončuji skript."
                     )
-                    break
+                    if lactate_data:
+                        append_or_update_csv(CSV_FILES["lactate_threshold"], lactate_data)
+                    raise
                 except Exception as e:
                     logger.debug(f"[DEBUG] Chyba při fallback lactate {date_str}: {str(e)[:50]}")
 
@@ -1211,6 +1348,8 @@ def sync_lactate_threshold(garmin_obj: Garmin, start_date: str, end_date: str) -
 
         random_sleep()
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci lactate threshold: {e}")
 
@@ -1290,9 +1429,11 @@ def sync_training_status(garmin_obj: Garmin, start_date: str, end_date: str) -> 
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky TRAINING STATUS. "
-                    f"Uloženo {len(status_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(status_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if status_data:
+                    append_or_update_csv(CSV_FILES["training_status"], status_data)
+                raise
             except Exception as e:
                 logger.debug(f"[DEBUG] Chyba při stahování training status pro {date_str}: {str(e)[:100]}")
 
@@ -1304,6 +1445,8 @@ def sync_training_status(garmin_obj: Garmin, start_date: str, end_date: str) -> 
         else:
             logger.info("[INFO] Training Status: bez dostupných dat v API")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci training status: {e}")
 
@@ -1357,9 +1500,11 @@ def sync_movement(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky POHYB. "
-                    f"Uloženo {len(movement_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(movement_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if movement_data:
+                    append_or_update_csv(CSV_FILES["movement"], movement_data)
+                raise
             except Exception as e:
                 logger.debug(f"[DEBUG] Chyba při stahování pohybových dat pro {date_str}: {str(e)[:50]}")
 
@@ -1371,6 +1516,8 @@ def sync_movement(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         else:
             logger.info("[INFO] Pohyb: bez dostupných dat v API")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci pohybu: {e}")
 
@@ -1424,9 +1571,11 @@ def sync_intensity(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky INTENZITA. "
-                    f"Uloženo {len(intensity_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(intensity_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if intensity_data:
+                    append_or_update_csv(CSV_FILES["intensity"], intensity_data)
+                raise
             except Exception as e:
                 logger.debug(f"[DEBUG] Chyba při stahování intenzitních dat pro {date_str}: {str(e)[:50]}")
 
@@ -1438,6 +1587,8 @@ def sync_intensity(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         else:
             logger.info("[INFO] Intenzita: bez dostupných dat v API")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci intenzity: {e}")
 
@@ -1516,9 +1667,13 @@ def sync_heart_rate(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
             except GarminRateLimitError:
                 logger.warning(
                     f"[RATE LIMIT] Garmin API nás odřízlo u metriky TEPOVÁ FREKVENCE. "
-                    f"Uloženo {len(summary_data)} záznamů. Další pokus zkuste za pár hodin."
+                    f"Uloženo {len(summary_data)} záznamů. Ukončuji skript."
                 )
-                break
+                if summary_data:
+                    append_or_update_csv(CSV_FILES["heart_rate_summary"], summary_data)
+                if details_data:
+                    append_or_update_csv(CSV_FILES["heart_rate_details"], details_data)
+                raise
             except Exception as e:
                 logger.debug(f"[DEBUG] Chyba při stahování tepové frekvence pro {date_str}: {str(e)[:100]}")
 
@@ -1534,6 +1689,8 @@ def sync_heart_rate(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
             append_or_update_csv(CSV_FILES["heart_rate_details"], details_data)
             logger.info(f"[INFO] Synchronizovány TEPOVÁ DATA (detaily): {len(details_data)} meření")
 
+    except GarminRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"[ERROR] Chyba při synchronizaci tepové frekvence: {e}")
 
@@ -1542,8 +1699,14 @@ def sync_heart_rate(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
 # HLAVNÍ FUNKCE
 # ============================================================================
 
-def main():
-    """Hlavní funkce pro synchronizaci všech Garmin dat."""
+def main() -> set:
+    """Hlavní funkce pro synchronizaci všech Garmin dat.
+
+    Returns:
+        Set of activity_id values that were synced (new or updated).
+        Empty set if sync was skipped or no activities were synced.
+    """
+    dirty_ids: set = set()
 
     # 1. Zajisti existenci datových složek (bez mazání existujících dat)
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1556,14 +1719,14 @@ def main():
     # Přímá kontrola: pokud jsou credentials prázdné, přeskoč sync a pokračuj v pipeline
     if not email or not password:
         logger.info("ℹ️  Garmin credentials missing. Skipping cloud sync.")
-        return
+        return dirty_ids
 
     # 3. Ověření se do Garmin Connect – pokud selže, pokračuj s lokálními soubory
     try:
         garmin_obj = authenticate(email, password)
     except Exception as auth_err:
         logger.warning(f"[WARN] Garmin login failed: {auth_err}. Skipping cloud sync and continuing pipeline.")
-        return
+        return dirty_ids
 
     # 4. Vypočítej datumový rozsah pro stahování (Incremental Sync)
     end_date = datetime.now()
@@ -1583,12 +1746,51 @@ def main():
                 logger.warning(f"[WARN] Chyba při čtení {csv_path} pro detekci posledního data: {e}")
 
     if last_date is not None:
-        # Pojistka: 3 dny dozadu – Garmin občas zpětně upravuje data
-        start_date = last_date - timedelta(days=3)
-        logger.info(f"[INFO] Nalezena existující data. Stahuji pouze chybějící dny od {start_date.strftime('%Y-%m-%d')}.")
+        # ── Smart Incremental Sync: FIT existence check (last 7 days) ────
+        # Pro posledních 7 dní zkontroluj fyzickou existenci FIT souborů
+        # na disku. Pokud soubor chybí, naplánuj download.
+        backfill_days = 7  # vždy pokryjeme celý týden
+        force_redownload_ids: list = []
+        activities_csv = CSV_FILES["activities"]
+        if activities_csv.exists():
+            try:
+                df_act = pd.read_csv(activities_csv)
+                if "activity_id" in df_act.columns and "date" in df_act.columns and not df_act.empty:
+                    cutoff_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+                    recent = df_act[df_act["date"].astype(str) >= cutoff_date]
+                    missing_fit = 0
+                    for _, row in recent.iterrows():
+                        aid = row.get("activity_id")
+                        if aid is None or pd.isna(aid):
+                            continue
+                        aid = int(aid) if isinstance(aid, float) else aid
+                        fit_path = FIT_DIR / f"activity_{aid}.fit"
+                        if not fit_path.exists():
+                            missing_fit += 1
+                            force_redownload_ids.append(aid)
+                            logger.info(
+                                f"[FIT CHECK] Chybí FIT soubor pro aktivitu {aid} "
+                                f"(datum: {row.get('date', '?')})"
+                            )
+                    if missing_fit > 0:
+                        logger.info(
+                            f"[FIT CHECK] {missing_fit} aktivit z posledních 7 dní "
+                            f"nemá FIT soubor na disku – vynucuji stažení."
+                        )
+                    else:
+                        logger.info("[FIT CHECK] Všechny FIT soubory za posledních 7 dní existují.")
+            except Exception as e:
+                logger.warning(f"[WARN] FIT existence check selhal: {e}")
+
+        start_date = last_date - timedelta(days=backfill_days)
+        logger.info(
+            f"[INFO] Nalezena existující data. Sync okno: "
+            f"{start_date.strftime('%Y-%m-%d')} → dnes (backfill={backfill_days}d)."
+        )
     else:
         # Nová instalace: stáhni posledních INITIAL_BACKFILL_DAYS dní
         start_date = end_date - timedelta(days=INITIAL_BACKFILL_DAYS)
+        force_redownload_ids = []
         logger.info(f"[INFO] Žádná existující data. Zahajuji backfill za posledních {INITIAL_BACKFILL_DAYS} dní.")
 
     start_date_str = start_date.strftime("%Y-%m-%d")
@@ -1596,9 +1798,23 @@ def main():
 
     logger.info(f"[INFO] Zahájuji synchronizaci od {start_date_str} do {end_date_str}")
 
-    # 5. Synchronizuj všechny metriky – pokud jedna selže, pokračuj další
-    _sync_steps = [
-        ("AKTIVITY", sync_activities),
+    # 5. Synchronizuj všechny metriky.
+    #    GarminRateLimitError (429) je FATÁLNÍ – okamžité ukončení.
+    #    Ostatní chyby → přeskoč metriku a pokračuj.
+    try:
+        sync_activities(garmin_obj, start_date_str, end_date_str,
+                        force_redownload_ids=force_redownload_ids)
+    except GarminNotFoundError:
+        logger.info(
+            "[INFO] Metrika AKTIVITY nenalezena (404). Přeskakuji."
+        )
+    except GarminRateLimitError as e:
+        logger.error(f"[FATAL] {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.warning(f"[WARN] Chyba při synchronizaci AKTIVITY: {e}. Přeskakuji.")
+
+    _sync_steps: List[tuple] = [
         ("HRV", sync_hrv),
         ("VO2 MAX", sync_vo2_max),
         ("SPÁNEK", sync_sleep),
@@ -1616,22 +1832,45 @@ def main():
     for metric_name, sync_fn in _sync_steps:
         try:
             sync_fn(garmin_obj, start_date_str, end_date_str)
+            random_sleep(4, 8)
         except GarminNotFoundError:
             logger.info(
-                f"[INFO] Metrika {metric_name} nenalezena (Chyba 404) "
-                f"- pravděpodobně chybí data pro tento účet. Přeskakuji..."
+                f"[INFO] Metrika {metric_name} nenalezena (404). Přeskakuji."
             )
         except GarminRateLimitError as e:
-            logger.warning(
-                f"[RATE LIMIT] {e} Přeskakuji na další metriku."
+            logger.error(
+                f"[FATAL] Rate limit hit u metriky {metric_name}. "
+                f"Wait 60 min. Detail: {e}"
             )
+            sys.exit(1)
         except Exception as e:
             logger.warning(
-                f"[WARN] Chyba při synchronizaci {metric_name}: {e}. "
-                f"Přeskakuji na další metriku."
+                f"[WARN] Chyba při synchronizaci {metric_name}: {e}. Přeskakuji."
             )
 
     logger.info("[INFO] ✅ Synchronizace dokončena!")
+
+    # Collect dirty activity IDs from the activities CSV (all IDs in the sync window)
+    try:
+        activities_csv = CSV_FILES["activities"]
+        if activities_csv.exists():
+            df_act = pd.read_csv(activities_csv)
+            if "activity_id" in df_act.columns and "date" in df_act.columns:
+                mask = df_act["date"].astype(str) >= start_date_str
+                synced = df_act.loc[mask, "activity_id"].dropna()
+                dirty_ids = set(int(x) if not isinstance(x, int) else x for x in synced)
+    except Exception as e:
+        logger.warning(f"[WARN] Nepodařilo se načíst dirty IDs: {e}")
+
+    # Persist dirty IDs to a marker file for downstream pipeline stages
+    dirty_ids_file = SUMMARIES_DIR / ".dirty_activity_ids.json"
+    try:
+        dirty_ids_file.write_text(json.dumps(list(dirty_ids), default=str))
+        logger.info(f"[INFO] Dirty IDs ({len(dirty_ids)}) uloženy do {dirty_ids_file}")
+    except Exception as e:
+        logger.warning(f"[WARN] Nepodařilo se uložit dirty IDs: {e}")
+
+    return dirty_ids
 
 
 if __name__ == "__main__":

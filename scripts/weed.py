@@ -18,7 +18,7 @@ import sys
 import time
 
 # ── Project root on sys.path ─────────────────────────────────────────────────
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
 for _p in (PROJECT_ROOT, SRC_DIR):
     if _p not in sys.path:
