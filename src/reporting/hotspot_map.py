@@ -45,7 +45,7 @@ except ImportError:
     sys.exit(1)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 HOTSPOTS_CSV = os.path.join(_PROJECT_ROOT, "data", "processed", "botanical_hotspots_ranked.csv")
 STOPS_CSV = os.path.join(_PROJECT_ROOT, "data", "processed", "green_stops_report.csv")

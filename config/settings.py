@@ -103,7 +103,7 @@ CYCLING_SPEED_THRESHOLD_MS  = 0.833   # m/s – 3.0 km/h
 # ============================================================
 # GARMIN SYNC
 # ============================================================
-INITIAL_BACKFILL_DAYS  = 180   # Days of history on first sync
+INITIAL_BACKFILL_DAYS  = 3     # Days of history on first sync (low to avoid rate-limit ban)
 
 # ============================================================
 # CSV FILE NAMES (inside SUMMARIES_DIR)

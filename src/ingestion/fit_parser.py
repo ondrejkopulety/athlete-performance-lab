@@ -47,6 +47,27 @@ from config.settings import (
     TRIMP_K1, TRIMP_K2,
 )
 
+from datetime import timezone as _tz
+
+
+def _to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """
+    Normalizuje datetime na naivní UTC (bez tzinfo).
+
+    **Single source of truth** pro celý pipeline – master_rebuild.py
+    a athlete_analytics.py importují tuto funkci.
+
+    Garmin FIT soubory typicky ukládají UTC jako naivní datetime.
+    Strava exporty mohou obsahovat tz-aware local time.
+    Sjednocení na naivní UTC zajistí konzistentní date sloupec
+    se zbytkem pipeline (master_rebuild, garmin_to_csv).
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(_tz.utc).replace(tzinfo=None)
+    return dt
+
 # Sporty považované za cyklistiku (pro vyšší speed threshold)
 CYCLING_SPORTS: frozenset[str] = frozenset({
     "cycling", "gravel_cycling", "mountain_biking",
@@ -333,7 +354,6 @@ def parse_fit_file(
     session_max_temp: Optional[float] = None
     session_te_aerobic: Optional[float] = None
     session_te_anaerobic: Optional[float] = None
-    session_vo2_max: Optional[float] = None
 
     # Sport + datum + fyzické/výkonnostní metriky ze 'session' zprávy
     for msg in fitfile.get_messages("session"):
@@ -347,7 +367,7 @@ def parse_fit_file(
         if act_date is None:
             ts = vals.get("start_time")
             if isinstance(ts, datetime):
-                act_date = ts.date()
+                act_date = _to_naive_utc(ts).date()
 
         # Fyzické metriky ze session
         session_distance = _safe_float(vals.get("total_distance"))
@@ -372,47 +392,13 @@ def parse_fit_file(
         # Výkonnostní metriky
         session_te_aerobic   = _safe_float(vals.get("total_training_effect"))
         session_te_anaerobic = _safe_float(vals.get("total_anaerobic_training_effect"))
-        # VO2max – hledej ve více polích (žádná náhrada odpechováním – ta je fyziologicky nesmyslná)
-        session_vo2_max = None
-        for vo2_key in ("vo2_max", "estimated_vo2_max", "vo2max"):
-            v = _safe_float(vals.get(vo2_key))
-            if v is not None and v > 0:
-                # Garmin scale-factor sanity check.
-                # Some firmware versions emit a raw fixed-point integer
-                # (e.g. ~900 000) instead of the human-readable value.
-                # Applying val / 65536 * 3.5 recovers the real ml/kg/min figure.
-                # If the parsed value is already in the realistic VO2max range
-                # (10–100 ml/kg/min), use it directly.
-                if v > 200:
-                    # Raw large integer – apply Garmin multiplier
-                    v_scaled = v / 65536 * 3.5
-                    if 10.0 <= v_scaled <= 100.0:
-                        v = v_scaled
-                elif v < 10:
-                    # Suspiciously small – attempt multiplier (per Garmin spec)
-                    v_scaled = v / 65536 * 3.5
-                    v = v_scaled if 10.0 <= v_scaled <= 100.0 else None
-                session_vo2_max = v
-                break
         break
-
-    # VO2max záloha z user_profile zpráv (pokud session zpráva neobsahovala)
-    if session_vo2_max is None:
-        for _up_msg in fitfile.get_messages("user_profile"):
-            _up_vals = _up_msg.get_values()
-            for _fid in (0, 1):
-                _v = _safe_float(_up_vals.get(_fid))
-                if _v is not None and 10.0 <= _v <= 100.0:
-                    session_vo2_max = _v
-                    break
-            if session_vo2_max is not None:
-                break
 
     # Záloha data z prvního záznamu
     if act_date is None:
         ts0 = raw_records[0].get("timestamp")
         if isinstance(ts0, datetime):
-            act_date = ts0.date()
+            act_date = _to_naive_utc(ts0).date()
 
     # Klidový tep: pouze baseline (externí data se nenačítají)
     rhr: int = BASELINE_RHR
@@ -438,8 +424,8 @@ def parse_fit_file(
     speeds_series = pd.Series([_safe_float(r.get("enhanced_speed") or r.get("speed")) for r in raw_records]).infer_objects(copy=False)
 
     # Použijeme lineární interpolaci s limitem 15 záznamů (což odpovídá cca 15 vteřinám)
-    altitudes_series = altitudes_series.interpolate(method='linear', limit=15)
-    speeds_series = speeds_series.interpolate(method='linear', limit=15)
+    altitudes_series = altitudes_series.infer_objects(copy=False).interpolate(method='linear', limit=15)
+    speeds_series = speeds_series.infer_objects(copy=False).interpolate(method='linear', limit=15)
 
     altitudes = altitudes_series.tolist()
     speeds = speeds_series.tolist()
@@ -491,6 +477,8 @@ def parse_fit_file(
                 ts_dt = datetime.fromisoformat(ts)
             except ValueError:
                 pass
+        # Normalize tz-aware timestamps (e.g. Strava exports) to naive UTC
+        ts_dt = _to_naive_utc(ts_dt)
 
         seg_s = max(0.0, min(120.0, (ts_dt - prev_ts).total_seconds())) if (ts_dt and prev_ts) else 1.0
         prev_ts = ts_dt
@@ -727,7 +715,7 @@ def parse_fit_file(
         # Výkonnostní
         "training_effect_aerobic":   session_te_aerobic if session_te_aerobic is not None else "",
         "training_effect_anaerobic": session_te_anaerobic if session_te_anaerobic is not None else "",
-        "vo2_max":            session_vo2_max if session_vo2_max is not None else "",
+        "vo2_max":            "",  # merged externally from data/summaries/vo2_max.csv
         # Stoupání (pro VAM)
         "uphill_minutes":     round(uphill_seconds / 60.0, 2),
     }
@@ -775,6 +763,31 @@ def parse_fit_to_memory(
 # HLAVNÍ FUNKCE
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _load_existing_ids(csv_path: str) -> set[str]:
+    """Načte activity_id z existujícího summary CSV do setu (pro inkrementální režim)."""
+    ids: set[str] = set()
+    if not os.path.isfile(csv_path):
+        return ids
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                aid = row.get("activity_id", "").strip()
+                if aid:
+                    ids.add(aid)
+    except Exception as exc:
+        log.warning("Nelze načíst existující IDs z %s: %s – zpracuji vše.", csv_path, exc)
+        return set()
+    return ids
+
+
+def _csv_needs_header(csv_path: str) -> bool:
+    """True pokud soubor neexistuje nebo je prázdný."""
+    if not os.path.isfile(csv_path):
+        return True
+    return os.path.getsize(csv_path) == 0
+
+
 def main() -> None:
     log.info("=" * 70)
     log.info("Garmin AI Trainer – FIT → CSV  (MAX_HR=%d bpm, baseline_RHR=%d bpm)",
@@ -794,34 +807,59 @@ def main() -> None:
         log.error("Žádné .fit soubory v %s", FIT_FOLDER)
         return
 
-    log.info("Nalezeno %d FIT souborů. Zahajuji zpracování...", len(fit_files))
+    # ── Inkrementální režim: přeskoč již zpracované aktivity ────────────────
+    existing_ids = _load_existing_ids(SUMMARY_CSV)
+    if existing_ids:
+        log.info("Nalezeno %d již zpracovaných aktivit v %s.", len(existing_ids), SUMMARY_CSV)
+
+    new_fit_files = [
+        f for f in fit_files
+        if extract_activity_id(f) not in existing_ids
+    ]
+    skipped = len(fit_files) - len(new_fit_files)
+
+    if not new_fit_files:
+        log.info("Všech %d aktivit již zpracováno – nic nového.", len(fit_files))
+        return
+
+    log.info("Nalezeno %d FIT souborů celkem, %d přeskočeno, %d ke zpracování.",
+             len(fit_files), skipped, len(new_fit_files))
 
     summary_rows: list[dict] = []
     processed = failed = 0
 
-    # Streaming zápis do high_res_training_data.csv (memory-safe)
-    with open(HIGHRES_CSV, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=HIGHRES_COLS)
-        writer.writeheader()
-        for i, fit_path in enumerate(fit_files, 1):
-            log.info("─── [%d/%d] %s", i, len(fit_files), os.path.basename(fit_path))
-            result = parse_fit_file(fit_path, writer)
+    # ── Streaming zápis – append režim s podmíněným headerem ────────────────
+    write_highres_header = _csv_needs_header(HIGHRES_CSV)
+    write_summary_header = _csv_needs_header(SUMMARY_CSV)
+
+    with (
+        open(HIGHRES_CSV, "a", newline="", encoding="utf-8") as fh,
+        open(SUMMARY_CSV, "a", newline="", encoding="utf-8") as sf,
+    ):
+        hr_writer = csv.DictWriter(fh, fieldnames=HIGHRES_COLS)
+        sm_writer = csv.DictWriter(sf, fieldnames=SUMMARY_COLS)
+
+        if write_highres_header:
+            hr_writer.writeheader()
+        if write_summary_header:
+            sm_writer.writeheader()
+
+        for i, fit_path in enumerate(new_fit_files, 1):
+            log.info("─── [%d/%d] %s", i, len(new_fit_files), os.path.basename(fit_path))
+            result = parse_fit_file(fit_path, hr_writer)
             if result is not None:
+                sm_writer.writerow(result)
                 summary_rows.append(result)
                 processed += 1
             else:
                 failed += 1
             if i % 10 == 0:
-                fh.flush()   # periodický flush → nízká RAM
-
-    # Summary CSV
-    with open(SUMMARY_CSV, "w", newline="", encoding="utf-8") as sf:
-        ws = csv.DictWriter(sf, fieldnames=SUMMARY_COLS)
-        ws.writeheader()
-        ws.writerows(summary_rows)
+                fh.flush()
+                sf.flush()
 
     log.info("=" * 70)
-    log.info("DOKONČENO  Zpracováno: %d aktivit  |  Chyb: %d", processed, failed)
+    log.info("DOKONČENO  Zpracováno: %d aktivit  |  Chyb: %d  |  Přeskočeno: %d",
+             processed, failed, skipped)
     if summary_rows:
         trimps = [r["total_trimp"] for r in summary_rows if r["total_trimp"]]
         log.info("Celkový TRIMP:          %.1f", sum(trimps))

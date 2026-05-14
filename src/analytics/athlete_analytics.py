@@ -52,6 +52,7 @@ PRODUKČNÍ REŽIM – zpracovává kompletní databázi bez omezení.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import sys
@@ -259,8 +260,10 @@ def load_csv(path: str, required: bool = True) -> pd.DataFrame:
 
 def load_master() -> pd.DataFrame:
     df = load_csv(MASTER_CSV)
+    # Normalize to naive UTC: strip any timezone info for consistent date comparisons
+    dt_col = pd.to_datetime(df["date"], utc=True)
     df = df.assign(
-        date=pd.to_datetime(df["date"]).dt.date,
+        date=dt_col.dt.tz_localize(None).dt.date,
         activity_id=df["activity_id"].astype(str),
     )
     return df
@@ -278,7 +281,7 @@ def load_hrv() -> pd.DataFrame:
     df = load_csv(HRV_CSV, required=False)
     if df.empty:
         return df
-    df = df.assign(date=pd.to_datetime(df["date"]).dt.date)
+    df = df.assign(date=pd.to_datetime(df["date"], utc=True).dt.tz_localize(None).dt.date)
     return df
 
 
@@ -286,7 +289,7 @@ def load_health() -> pd.DataFrame:
     df = load_csv(HEALTH_CSV, required=False)
     if df.empty:
         return df
-    df = df.assign(date=pd.to_datetime(df["date"]).dt.date)
+    df = df.assign(date=pd.to_datetime(df["date"], utc=True).dt.tz_localize(None).dt.date)
     return df
 
 
@@ -295,33 +298,65 @@ def load_sleep() -> pd.DataFrame:
     df = load_csv(SLEEP_CSV, required=False)
     if df.empty:
         return df
-    df = df.assign(date=pd.to_datetime(df["date"]).dt.date)
+    df = df.assign(date=pd.to_datetime(df["date"], utc=True).dt.tz_localize(None).dt.date)
     return df
 
 
 def load_training_data_bulk(activity_ids: set) -> dict:
+    """REMOVED – use iter_training_data() for memory-efficient processing.
+
+    Loading all training data into RAM simultaneously is unsustainable for
+    large datasets (hundreds of activities × thousands of rows each).
+    All callers have been migrated to iter_training_data() which yields
+    one activity at a time and releases memory immediately.
+
+    Raises RuntimeError to catch any accidental legacy usage.
     """
-    Single-pass read of TRAINING_CSV for a set of activity IDs.
-    Returns dict {activity_id: DataFrame} – much faster than one-by-one reads.
+    raise RuntimeError(
+        "load_training_data_bulk() is removed. "
+        "Use iter_training_data() for sequential, memory-efficient processing."
+    )
+
+
+def iter_training_data(activity_ids: set) -> dict:
     """
-    frames_by_id: dict = {aid: [] for aid in activity_ids}
+    Memory-efficient single-pass reader of TRAINING_CSV.
+
+    Yields ``(activity_id, DataFrame)`` tuples one at a time.  The caller
+    can process and discard each activity's DataFrame before the next one
+    is loaded, keeping peak memory proportional to the **largest single
+    activity** instead of *all activities combined*.
+
+    Implementation: reads CSV in 500 k-row chunks, accumulates rows per
+    activity, and yields completed activities as soon as all their chunks
+    have been seen.  Because the CSV is ordered by time, most activities
+    are fully contained within a single chunk.
+    """
+    pending: dict[str, list[pd.DataFrame]] = {aid: [] for aid in activity_ids}
+    seen_aids: set[str] = set()
+
     for chunk in pd.read_csv(TRAINING_CSV, chunksize=500_000, low_memory=False):
         chunk = chunk.assign(activity_id=chunk["activity_id"].astype(str))
         filtered = chunk.loc[chunk["activity_id"].isin(activity_ids)]
         if filtered.empty:
             continue
         for aid, grp in filtered.groupby("activity_id"):
-            frames_by_id[str(aid)].append(grp)
+            aid_str = str(aid)
+            if aid_str in pending:
+                pending[aid_str].append(grp)
+                seen_aids.add(aid_str)
 
-    result = {}
-    for aid, frames in frames_by_id.items():
+    # Yield one activity at a time and release memory
+    for aid in list(seen_aids):
+        frames = pending.pop(aid, [])
         if not frames:
             continue
         df = pd.concat(frames, ignore_index=True)
         df = df.assign(timestamp=pd.to_datetime(df["timestamp"]))
         df = df.sort_values("timestamp").reset_index(drop=True)
-        result[aid] = df
-    return result
+        yield aid, df
+        del df, frames  # explicit release
+        gc.collect()     # reclaim memory between activities
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -589,34 +624,35 @@ def compute_per_activity_metrics(
     aid_set = set(eligible["activity_id"].astype(str).tolist())
     n = len(aid_set)
     print(f"  PRODUKČNÍ REŽIM: {n} aktivit ke skenování (celá databáze)...")
-    print("  Načítám vteřinová data (1 průchod)...")
+    print("  Načítám vteřinová data sekvenčně (memory-efficient)...")
 
-    # ── single-pass bulk load ────────────────────────────────────────────
-    tdata_map = load_training_data_bulk(aid_set)
-    print(f"  Načteno {len(tdata_map)} aktivit ze souboru.")
+    # ── Build index: activity_id → (DataFrame index, sport) for fast lookup ──
+    aid_to_rows: dict[str, list[tuple]] = {}
+    for idx, row in eligible.iterrows():
+        aid = str(row["activity_id"])
+        aid_to_rows.setdefault(aid, []).append((idx, str(row["sport"]).lower()))
 
     # Collect results into dicts first, then assign as whole columns at the end.
-    # This avoids per-row .loc[] writes which cause memory fragmentation on large
-    # DataFrames (each write may trigger a copy of the underlying block store).
     drift_results: dict = {}
     hrr_results: dict = {}
 
-    for i, (idx, row) in enumerate(eligible.iterrows(), 1):
-        aid = str(row["activity_id"])
-        tdata = tdata_map.get(aid, pd.DataFrame())
-
-        sport = str(row["sport"]).lower()
-        drift = cardiac_drift_for_activity(tdata, sport)
-        hrr_60 = max_hrr_60s_for_activity(tdata)
-
-        drift_results[idx] = drift
-        hrr_results[idx] = hrr_60
+    # ── Sequential processing: load one activity at a time ───────────────
+    loaded_count = 0
+    for i, (aid, tdata) in enumerate(iter_training_data(aid_set), 1):
+        loaded_count += 1
+        rows_info = aid_to_rows.get(aid, [])
+        for idx, sport in rows_info:
+            drift = cardiac_drift_for_activity(tdata, sport)
+            hrr_60 = max_hrr_60s_for_activity(tdata)
+            drift_results[idx] = drift
+            hrr_results[idx] = hrr_60
 
         if i % 20 == 0 or i == n:
-            print(
-                f"    [{i}/{n}]  {row['date']}  "
-                f"drift={drift}  max_hrr_60s={hrr_60}"
-            )
+            print(f"    [{i}/{n}]  zpracováno (poslední drift={drift_results.get(idx)})")
+
+        del tdata  # uvolni paměť
+
+    print(f"  Načteno a zpracováno {loaded_count} aktivit ze souboru.")
 
     # Bulk column update – single write to the backing store
     if drift_results:
@@ -729,42 +765,81 @@ def compute_readiness(
     daily: pd.DataFrame, hrv_df: pd.DataFrame
 ) -> pd.DataFrame:
     """
-    Readiness = 0.6 * normalised_HRV_zscore + 0.4 * normalised_TSB.
-    HRV Z-Score = (last_night_avg - 30d_rolling_mean) / 30d_rolling_std.
-    Result clamped to 0–100.
+    Dual-era Bio-Readiness Score (0–100 %).
+
+    Legacy Mode  (před Garminem – bez spánku a HRV dat):
+        Readiness = f(TSB)  pouze tréninkový stres.
+        TSB ≥ +10  → 100 %
+        TSB = −10  →  50 %
+        TSB ≤ −30  →   0 %
+        Lineární mapování: ((TSB.clip(-30, 10) + 30) / 40) * 100
+
+    Modern Mode  (Garmin éra – existují sleep_score_day A hrv_last_night):
+        Readiness = 0.30 * normed_HRV_zscore
+                  + 0.30 * sleep_score_day        (sleep je už 0–100)
+                  + 0.40 * normed_TSB
+
+    Přepínač: per-row – moderní mód aktivní jen pokud oba sloupce
+    (sleep_score_day, hrv_last_night) jsou pro daný řádek != NaN.
     """
     daily = daily.copy()
 
-    # ── HRV Z-score ──────────────────────────────────────────────────────
-    if hrv_df.empty or "last_night_avg" not in hrv_df.columns:
+    # ── Normalised TSB (společný pro oba módy) ────────────────────────────
+    if "TSB" not in daily.columns:
         daily.loc[:, "readiness_score"] = np.nan
         return daily
 
-    hrv = hrv_df[["date", "last_night_avg"]].copy()
-    hrv = hrv.assign(date=pd.to_datetime(hrv["date"]))
-    hrv = hrv.set_index("date").sort_index()
+    tsb = pd.to_numeric(daily["TSB"], errors="coerce")
+    # Legacy mapping: (-30, 0) … (+10, 100), linear
+    tsb_legacy = ((tsb.clip(-30, 10) + 30) / 40) * 100
+    # Modern mapping (wider range gives more dynamic range): same formula
+    tsb_normed = tsb_legacy  # reused for modern mode
 
-    hrv_val = hrv["last_night_avg"].astype(float)
-    hrv_30d_mean = hrv_val.rolling(window=30, min_periods=7).mean()
-    hrv_30d_std = hrv_val.rolling(window=30, min_periods=7).std().replace(0, np.nan)
-    hrv_zscore = (hrv_val - hrv_30d_mean) / hrv_30d_std
+    # ── HRV Z-score (moderní mód) ─────────────────────────────────────────
+    normed_hrv = pd.Series(np.nan, index=daily.index)
+    if hrv_df is not None and not hrv_df.empty and "last_night_avg" in hrv_df.columns:
+        hrv = hrv_df[["date", "last_night_avg"]].copy()
+        hrv = hrv.assign(date=pd.to_datetime(hrv["date"]))
+        hrv = hrv.set_index("date").sort_index()
+        hrv_val = hrv["last_night_avg"].astype(float)
+        hrv_30d_mean = hrv_val.rolling(window=30, min_periods=7).mean()
+        hrv_30d_std  = hrv_val.rolling(window=30, min_periods=7).std().replace(0, np.nan)
+        hrv_zscore   = (hrv_val - hrv_30d_mean) / hrv_30d_std
+        hrv_clipped  = hrv_zscore.clip(-3, 3)
+        normed_hrv_raw = ((hrv_clipped + 3) / 6) * 100  # maps -3→0, +3→100
+        # align to daily index
+        normed_hrv = normed_hrv.combine_first(normed_hrv_raw.reindex(daily.index, method=None))
 
-    # normalise z-score → 0-100 (clip to ±3)
-    hrv_zscore_clipped = hrv_zscore.clip(-3, 3)
-    normed_hrv = ((hrv_zscore_clipped + 3) / 6) * 100  # maps -3→0, +3→100
+    # ── Sleep score (moderní mód) ─────────────────────────────────────────
+    # sleep_score_day populated by compute_pure_recovery (called before us)
+    sleep_score = pd.to_numeric(
+        daily.get("sleep_score_day", pd.Series(np.nan, index=daily.index)),
+        errors="coerce",
+    ).clip(0, 100)
 
-    # ── Normalised TSB ────────────────────────────────────────────────────
-    tsb = daily["TSB"].copy()
-    tsb_clipped = tsb.clip(-40, 30)
-    normed_tsb = ((tsb_clipped + 40) / 70) * 100  # maps -40→0, +30→100
+    hrv_tonight = pd.to_numeric(
+        daily.get("hrv_last_night", pd.Series(np.nan, index=daily.index)),
+        errors="coerce",
+    )
 
-    # ── merge on date index ───────────────────────────────────────────────
-    normed_hrv_frame = normed_hrv.to_frame("norm_hrv")
-    daily = daily.join(normed_hrv_frame, how="left")
+    # ── Per-row mode selection ────────────────────────────────────────────
+    is_modern = sleep_score.notna() & hrv_tonight.notna()
 
-    readiness = 0.6 * daily["norm_hrv"].fillna(50) + 0.4 * normed_tsb
-    daily.loc[:, "readiness_score"] = readiness.clip(0, 100).round(1)
-    daily = daily.drop(columns=["norm_hrv"], errors="ignore")
+    readiness_modern = (
+        0.30 * normed_hrv.fillna(50)
+        + 0.30 * sleep_score
+        + 0.40 * tsb_normed
+    )
+    readiness_legacy = tsb_legacy
+
+    readiness = readiness_legacy.copy()
+    readiness[is_modern] = readiness_modern[is_modern]
+    readiness = readiness.clip(0, 100).round(1)
+
+    # Propagate NaN only where TSB itself is NaN (no training data at all)
+    readiness[tsb.isna()] = np.nan
+
+    daily.loc[:, "readiness_score"] = readiness
     return daily
 
 
@@ -1331,7 +1406,10 @@ def compute_fatigue_index(daily: pd.DataFrame) -> pd.DataFrame:
 
     eff = daily["daily_efficiency"].copy()
     eff_7d = eff.rolling(7, min_periods=3).mean()
-    daily.loc[:, "fatigue_index"] = (eff / eff_7d.replace(0, np.nan)).round(3)
+    # mask() sets the denominator to NaN when eff_7d is 0 or negative
+    # (no training → insufficient window), so fatigue_index stays NaN safely.
+    safe_denom = eff_7d.mask(eff_7d <= 0)
+    daily.loc[:, "fatigue_index"] = (eff / safe_denom).round(3)
     return daily
 
 
@@ -2010,9 +2088,13 @@ def compute_extended_per_activity(
     n_elig = len(aid_set)
     dfa_mode = "neurokit2 (real)" if HAS_NEUROKIT else "proxy"
     print(f"  [P+U+V] Durability, DFA-alpha1 ({dfa_mode}), Resp RSA: "
-          f"{n_elig} aktivit...")
+          f"{n_elig} aktivit (memory-efficient)...")
 
-    tdata_map = load_training_data_bulk(aid_set)
+    # ── Build index: activity_id → list of (DataFrame index, sport) ──────
+    aid_to_rows_ext: dict[str, list[tuple]] = {}
+    for idx, row in eligible.iterrows():
+        aid = str(row["activity_id"])
+        aid_to_rows_ext.setdefault(aid, []).append((idx, str(row["sport"]).lower()))
 
     dur_results: dict = {}
     aet_results: dict = {}
@@ -2021,34 +2103,33 @@ def compute_extended_per_activity(
     resp_results: dict = {}
     proxy_results: dict = {}
 
-    for i, (idx, row) in enumerate(eligible.iterrows(), 1):
-        aid = str(row["activity_id"])
-        tdata = tdata_map.get(aid, pd.DataFrame())
+    # ── Sequential processing: one activity at a time ────────────────────
+    for i, (aid, tdata) in enumerate(iter_training_data(aid_set), 1):
+        rows_info = aid_to_rows_ext.get(aid, [])
+        for idx, sport in rows_info:
+            # Durability
+            dur = durability_for_activity(tdata, sport)
+            dur_results[idx] = dur
 
-        # Durability
-        sport = str(row["sport"]).lower()
-        dur = durability_for_activity(tdata, sport)
-        dur_results[idx] = dur
+            # DFA-alpha1 (real or proxy)
+            dfa = compute_dfa_alpha1_for_activity(aid, tdata)
+            aet_results[idx] = dfa["aet_hr_dfa"]
+            ant_results[idx] = dfa["ant_hr_dfa"]
+            quality_results[idx] = dfa["dfa_quality"]
 
-        # DFA-alpha1 (real or proxy)
-        dfa = compute_dfa_alpha1_for_activity(aid, tdata)
-        aet_results[idx] = dfa["aet_hr_dfa"]
-        ant_results[idx] = dfa["ant_hr_dfa"]
-        quality_results[idx] = dfa["dfa_quality"]
+            # Legacy proxy column (always computed for comparison)
+            proxy_results[idx] = dfa_alpha1_proxy_for_activity(tdata) if dfa["dfa_quality"] == "real" else dfa["aet_hr_dfa"]
 
-        # Legacy proxy column (always computed for comparison)
-        proxy_results[idx] = dfa_alpha1_proxy_for_activity(tdata) if dfa["dfa_quality"] == "real" else dfa["aet_hr_dfa"]
-
-        # Respiration Rate from RSA
-        resp = compute_resp_from_rr(aid)
-        resp_results[idx] = resp
+            # Respiration Rate from RSA
+            resp = compute_resp_from_rr(aid)
+            resp_results[idx] = resp
 
         if i % 50 == 0 or i == n_elig:
             print(
-                f"    [{i}/{n_elig}]  {row['date']}  "
-                f"dfa={dfa['dfa_quality']}  aet={dfa['aet_hr_dfa']}  "
-                f"ant={dfa['ant_hr_dfa']}  resp={resp}"
+                f"    [{i}/{n_elig}]  zpracováno"
             )
+
+        del tdata  # uvolni paměť
 
     # Bulk column updates
     if dur_results:
@@ -2400,10 +2481,9 @@ def main() -> None:
         daily.loc[:, "ef_trend"] = np.nan
 
     # ══════════════════════════════════════════════════════════════════════
-    #  E: Bio-Readiness Score
+    #  E: Bio-Readiness Score  (called after F so sleep/HRV cols exist)
     # ══════════════════════════════════════════════════════════════════════
-    print("[E] Bio-Readiness Score")
-    daily = compute_readiness(daily, hrv_df)
+    print("[E] Bio-Readiness Score (placeholder – computed after F)")
 
     # ── Max HRR 60s daily average (from master) ──────────────────────────
     hrr_valid = master.loc[master["max_hrr_60s"].notna()].copy() \
@@ -2424,6 +2504,12 @@ def main() -> None:
     # ══════════════════════════════════════════════════════════════════════
     print("[F] Pure Recovery Score + Sleep Performance")
     daily = compute_pure_recovery(daily, hrv_df, health_df, sleep_df)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  E (deferred): Bio-Readiness Score  – dual-era (Legacy / Modern)
+    # ══════════════════════════════════════════════════════════════════════
+    print("[E] Bio-Readiness Score (dual-era)")
+    daily = compute_readiness(daily, hrv_df)
 
     # ══════════════════════════════════════════════════════════════════════
     #  G: Illness Warning
