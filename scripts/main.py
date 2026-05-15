@@ -174,7 +174,7 @@ def step_analyze() -> bool:
     Returns True if analysis completed successfully.
     """
     log.info("=" * 60)
-    log.info("STEP 4 / 4 : ANALYZE – Athlete Analytics")
+    log.info("STEP 4 / 5 : ANALYZE – Athlete Analytics")
     log.info("=" * 60)
     try:
         from src.analytics.athlete_analytics import main as analyze_main
@@ -188,6 +188,26 @@ def step_analyze() -> bool:
         return False
 
 
+def step_export_cycling() -> bool:
+    """Step 5 – Export cycling activities to cycling_summary.csv.
+
+    Returns True if export completed successfully.
+    """
+    log.info("=" * 60)
+    log.info("STEP 5 / 5 : EXPORT CYCLING – Filtrování cyklistických aktivit")
+    log.info("=" * 60)
+    try:
+        from src.analytics.export_cycling import main as export_cycling_main
+        export_cycling_main()
+        return True
+    except ImportError:
+        log.warning("export_cycling not available – skipping.")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        log.error(f"Cycling export failed: {exc}")
+        return False
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -197,6 +217,7 @@ STEPS = {
     "parse": step_parse,
     "merge": step_merge,
     "analyze": step_analyze,
+    "export_cycling": step_export_cycling,
 }
 
 # Steps whose failure should prevent downstream analytics from running
