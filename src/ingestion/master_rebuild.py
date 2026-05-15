@@ -69,6 +69,14 @@ MASTER_SUMMARY_CSV = os.path.join(SUMMARY_FOLDER, "master_high_res_summary.csv")
 
 DEDUP_WINDOW          = timedelta(minutes=DEDUP_WINDOW_MIN)
 
+# Minimální počet R-R intervalů (HRV zpráv) pro spolehlivou detekci hrudního pásu.
+# Strava exporty mažou device_info, ale HRV zprávy přežijí → proxy pro SENSOR_STRAP.
+HRV_MIN_INTERVALS = 30
+
+# Verze schématu metadata cache. Při přidání nového pole zvyšte o 1 – vynutí
+# přeparsování všech FIT souborů a zabrání čtení neúplných záznamů.
+CACHE_VERSION = 2
+
 SOURCE_STRAVA = "strava"
 SOURCE_GARMIN = "garmin"
 
@@ -121,6 +129,7 @@ def get_fit_metadata(fit_path: str) -> dict:
         "total_records": 0,
         "hr_density":    0.0,
         "sensor_type":   SENSOR_UNKNOWN,
+        "hrv_count":     0,   # počet R-R intervalů; > 0 → hrudní pás (i bez device_info)
     }
 
     try:
@@ -191,6 +200,20 @@ def get_fit_metadata(fit_path: str) -> dict:
     if result["sensor_type"] == SENSOR_UNKNOWN and has_optical_hr:
         result["sensor_type"] = SENSOR_OPTICAL
 
+    # ── HRV zprávy (R-R intervaly) ─────────────────────────────────────────────
+    # Strava exportuje FIT soubory bez device_info, takže sensor_type zůstane
+    # SENSOR_UNKNOWN.  Přítomnost HRV zpráv (R-R intervaly) je spolehlivý důkaz
+    # hrudního pásu – optický snímač na zápěstí HRV zprávy negeneruje.
+    hrv_count = 0
+    for msg in fitfile.get_messages("hrv"):
+        vals = msg.get_values()
+        intervals = vals.get("time")
+        if isinstance(intervals, (list, tuple)):
+            hrv_count += sum(1 for v in intervals if v is not None)
+        elif intervals is not None:
+            hrv_count += 1
+    result["hrv_count"] = hrv_count
+
     return result
 
 
@@ -223,7 +246,14 @@ def _cache_load() -> dict:
     if os.path.exists(METADATA_CACHE_FILE):
         try:
             with open(METADATA_CACHE_FILE, encoding="utf-8") as fh:
-                return json.load(fh)
+                data = json.load(fh)
+            if data.get("__version__") != CACHE_VERSION:
+                log.info(
+                    "Metadata cache: verze se liší (v%s → v%d) – přegenerovávám všechna metadata.",
+                    data.get("__version__", "?"), CACHE_VERSION,
+                )
+                return {}
+            return {k: v for k, v in data.items() if k != "__version__"}
         except Exception as exc:
             log.warning("Nelze načíst metadata cache (%s) – začínám od nuly.", exc)
     return {}
@@ -233,8 +263,9 @@ def _cache_save(cache: dict) -> None:
     """Uloží metadata cache na disk (kompaktní JSON)."""
     try:
         os.makedirs(os.path.dirname(METADATA_CACHE_FILE), exist_ok=True)
+        data_to_save = {"__version__": CACHE_VERSION, **cache}
         with open(METADATA_CACHE_FILE, "w", encoding="utf-8") as fh:
-            json.dump(cache, fh, separators=(",", ":"))
+            json.dump(data_to_save, fh, separators=(",", ":"))
     except Exception as exc:
         log.warning("Nelze uložit metadata cache: %s", exc)
 
@@ -295,9 +326,13 @@ def collect_fit_files() -> tuple[list[dict], int, int]:
 
     all_files: list[tuple] = []  # (path, source, file_size, mtime)
 
-    # Garmin: rekurzivně všechny .fit soubory v data/fit/ včetně podsložek
+    # Garmin: rekurzivně všechny .fit soubory v data/fit/ včetně podsložek,
+    # ale bez Strava podsložky (STRAVA_FIT_FOLDER je vnořená uvnitř GARMIN_FIT_FOLDER)
     garmin_pattern = os.path.join(GARMIN_FIT_FOLDER, "**", "*.fit")
-    garmin_files = sorted(glob.glob(garmin_pattern, recursive=True))
+    garmin_files = sorted(
+        f for f in glob.glob(garmin_pattern, recursive=True)
+        if STRAVA_FIT_FOLDER not in f
+    )
     log.info("Garmin složka: %d FIT souborů", len(garmin_files))
     for fp in garmin_files:
         all_files.append((fp, SOURCE_GARMIN, os.path.getsize(fp), os.path.getmtime(fp)))
@@ -527,6 +562,29 @@ def _pick_winner(a: dict, b: dict) -> tuple[dict, str]:
             )
             return strava, reason
 
+        # Případ B2: device_info chybí (typicky Strava export), ale HRV zprávy
+        # (R-R intervaly) prozradí hrudní pás.  Optický snímač na zápěstí HRV
+        # zprávy negeneruje, takže přítomnost ≥ HRV_MIN_INTERVALS intervalů je
+        # spolehlivý proxy pro SENSOR_STRAP i bez device_info sekce.
+        g_hrv = (meta_a if a["source"] == SOURCE_GARMIN else meta_b).get("hrv_count", 0)
+        s_hrv = (meta_b if a["source"] == SOURCE_GARMIN else meta_a).get("hrv_count", 0)
+        if g_hrv >= HRV_MIN_INTERVALS and s_hrv < HRV_MIN_INTERVALS:
+            reason = (
+                f"Garmin ({g_label}) vs Strava ({s_label}), "
+                f"hrudní pás detekován přes HRV zprávy (R-R intervaly): "
+                f"Garmin {g_hrv} vs Strava {s_hrv} "
+                f"-> Ponechávám GARMIN (HRV = hrudní pás)"
+            )
+            return garmin, reason
+        if s_hrv >= HRV_MIN_INTERVALS and g_hrv < HRV_MIN_INTERVALS:
+            reason = (
+                f"Garmin ({g_label}) vs Strava ({s_label}), "
+                f"hrudní pás detekován přes HRV zprávy (R-R intervaly): "
+                f"Strava {s_hrv} vs Garmin {g_hrv} "
+                f"-> Vybírám STRAVA (HRV = hrudní pás)"
+            )
+            return strava, reason
+
         # Případ C: Ani jeden nemá pás → Garmin jako primární zdroj;
         #           pojistka: HR density
         if g_density >= HR_DENSITY_THRESHOLD:
@@ -575,6 +633,26 @@ def _pick_winner(a: dict, b: dict) -> tuple[dict, str]:
                 f"{_sensor_label(a_sensor)} vs {_sensor_label(b_sensor)}"
             )
             return winner, reason
+
+    # HRV fallback pro stejný zdroj – oba snímače UNKNOWN (např. dvě Strava verze
+    # téže aktivity, kde obě postrádají device_info).
+    if a_sensor == SENSOR_UNKNOWN and b_sensor == SENSOR_UNKNOWN:
+        a_hrv = meta_a.get("hrv_count", 0)
+        b_hrv = meta_b.get("hrv_count", 0)
+        if a_hrv >= HRV_MIN_INTERVALS and b_hrv < HRV_MIN_INTERVALS:
+            reason = (
+                f"Stejný zdroj ({a['source'].upper()}), oba snímače neznámé; "
+                f"hrudní pás detekován přes HRV: {a_hrv} vs {b_hrv} R-R intervalů "
+                f"-> {os.path.basename(a['path'])}"
+            )
+            return a, reason
+        if b_hrv >= HRV_MIN_INTERVALS and a_hrv < HRV_MIN_INTERVALS:
+            reason = (
+                f"Stejný zdroj ({a['source'].upper()}), oba snímače neznámé; "
+                f"hrudní pás detekován přes HRV: {b_hrv} vs {a_hrv} R-R intervalů "
+                f"-> {os.path.basename(b['path'])}"
+            )
+            return b, reason
 
     # Stejný (nebo nerozlišitelný) snímač → HR density
     if a_density != b_density:
