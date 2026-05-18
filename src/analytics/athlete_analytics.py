@@ -936,7 +936,8 @@ def compute_pure_recovery(
     # sleep_need = 450 min (7.5 h base) + 0.5 * TRIMP předchozího dne + recovery_tax
     # sleep_performance = (actual_duration / sleep_need) * 100
     trimp_prev = daily["trimp"].shift(1).fillna(0)  # den předtím (první den = 0, neextrapolujeme)
-    tax_prev = daily["recovery_tax_min"].shift(1).fillna(0) if "recovery_tax_min" in daily.columns else 0
+    # recovery_tax_hours je v hodinách → převod na minuty (* 60)
+    tax_prev = daily["recovery_tax_hours"].shift(1).fillna(0) * 60 if "recovery_tax_hours" in daily.columns else 0
     sleep_need = 450 + trimp_prev * 0.5 + tax_prev
     sleep_dur = daily["sleep_duration_min"] if "sleep_duration_min" in daily.columns else pd.Series(np.nan, index=daily.index)
     sleep_perf = (sleep_dur / sleep_need.replace(0, np.nan)) * 100
@@ -1279,8 +1280,8 @@ def build_daily_trimp(master: pd.DataFrame) -> pd.DataFrame:
     agg_dict: dict = {"total_trimp": "sum"}
     if "epoc_score" in master.columns:
         agg_dict["epoc_score"] = "sum"
-    if "recovery_tax_min" in master.columns:
-        agg_dict["recovery_tax_min"] = "sum"
+    if "recovery_tax_hours" in master.columns:
+        agg_dict["recovery_tax_hours"] = "sum"
 
     # Include sport for hiking/walking coefficient; then drop before agg
     _extra_cols = []
@@ -1320,9 +1321,9 @@ def build_daily_trimp(master: pd.DataFrame) -> pd.DataFrame:
     else:
         daily["trimp_epoc"] = daily["trimp"]
 
-    # Ensure recovery_tax_min column exists (filled with 0 if not in master)
-    if "recovery_tax_min" not in daily.columns:
-        daily["recovery_tax_min"] = 0.0
+    # Ensure recovery_tax_hours column exists (filled with 0 if not in master)
+    if "recovery_tax_hours" not in daily.columns:
+        daily["recovery_tax_hours"] = 0.0
 
     return daily
 
@@ -1586,14 +1587,13 @@ def compute_epoc(master: pd.DataFrame) -> pd.DataFrame:
     """
     Akumulovaný kyslíkový dluh.
 
-    Recovery tax (extra sleep need in minutes):
-      Exponential model: 15 × exp(Z5_min / 15)
-      • At Z5=0 min  → 15 min baseline (residual EPOC from sub-threshold effort)
-      • At Z5=10 min → ≈41 min  (vs ≈15 min with the old linear model)
-      • At Z5=30 min → ≈111 min (reflects true oxygen-debt accumulation curve)
-    The exponential shape mirrors the non-linear relationship between high-
-    intensity duration and post-exercise oxygen consumption documented in
-    exercise physiology literature (excess oxygen debt grows super-linearly).
+    Recovery tax (hours of reduced capacity):
+      Power model: recovery_tax_hours = min(96.0, round(0.08 × TRIMP^1.2, 1))
+      • TRIMP  50 (lehké vyjetí)   → ≈  8.7 h
+      • TRIMP 100 (střední zátěž)  → ≈ 20.0 h
+      • TRIMP 200 (těžký trénink)  → ≈ 46.0 h
+      • TRIMP 350+ (extrémní)      → tvrdý cap 96.0 h
+      Pokud TRIMP chybí (NaN), vrací 0.0.
 
     EPOC proxy score = time_in_z4 * 2 + time_in_z5 * 5 (arbitrary intensity units).
     """
@@ -1601,11 +1601,10 @@ def compute_epoc(master: pd.DataFrame) -> pd.DataFrame:
     z4 = pd.to_numeric(master.get("time_in_z4", pd.Series(dtype=float)), errors="coerce").fillna(0)
     z5 = pd.to_numeric(master.get("time_in_z5", pd.Series(dtype=float)), errors="coerce").fillna(0)
     master.loc[:, "epoc_score"] = (z4 * 2 + z5 * 5).round(1)
-    # Exponential recovery tax: 15 × e^(z5/15)
-    # Strict physiological cap at 240 min (4 h) – the raw exponential
-    # explodes for long Z5 durations (e.g. 60 min → 13+ h), which is
-    # physiologically impossible for recovery-sleep demand.
-    master.loc[:, "recovery_tax_min"] = (15.0 * np.exp(z5 / 15.0)).clip(upper=240.0).round(0)
+    # Power-law recovery tax based on TRIMP (activity-level)
+    trimp = pd.to_numeric(master.get("total_trimp", pd.Series(dtype=float)), errors="coerce")
+    recovery = (0.08 * trimp.pow(1.2)).clip(upper=96.0).round(1)
+    master.loc[:, "recovery_tax_hours"] = recovery.where(trimp.notna(), 0.0)
     return master
 
 
@@ -2543,7 +2542,7 @@ def main() -> None:
     #  Aggregate per-activity metrics into daily
     # ══════════════════════════════════════════════════════════════════════
     # EPOC / recovery_tax daily sums
-    for agg_col in ("epoc_score", "recovery_tax_min", "fat_g", "carb_g",
+    for agg_col in ("epoc_score", "recovery_tax_hours", "fat_g", "carb_g",
                      "fat_kcal", "carb_kcal", "fluid_loss_L"):
         if agg_col in master.columns:
             _m = master[["date", agg_col]].copy()
@@ -2577,7 +2576,7 @@ def main() -> None:
         "fat_g_daily", "carb_g_daily",
         "fluid_loss_L_daily",
         # EPOC (v6.0)
-        "epoc_score_daily", "recovery_tax_min_daily",
+        "epoc_score_daily", "recovery_tax_hours_daily",
         "coach_advice",
     ]
     out = daily[[c for c in out_cols if c in daily.columns]].copy()
@@ -2597,7 +2596,7 @@ def main() -> None:
         "fat_kcal_daily": 0, "carb_kcal_daily": 0,
         "fat_g_daily": 0, "carb_g_daily": 0,
         "fluid_loss_L_daily": 2,
-        "epoc_score_daily": 1, "recovery_tax_min_daily": 0,
+        "epoc_score_daily": 1, "recovery_tax_hours_daily": 1,
     }
     out = out.round({k: v for k, v in round_map.items() if k in out.columns})
     out.index = out.index.date
@@ -2613,7 +2612,7 @@ def main() -> None:
         "cardiac_drift", "max_hrr_60s", "vam_m_per_h",
         "fat_kcal", "carb_kcal", "fat_g", "carb_g",
         "fluid_loss_L", "heat_flag",
-        "epoc_score", "recovery_tax_min", "time_at_threshold_min",
+        "epoc_score", "recovery_tax_hours", "time_at_threshold_min",
         "tte_z4z5_min",
         "durability_pct", "aet_hr_proxy",
         "avg_gradient_pct", "climb_category",
