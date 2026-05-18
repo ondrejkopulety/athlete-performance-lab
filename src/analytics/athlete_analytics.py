@@ -1571,8 +1571,11 @@ def compute_tte(master: pd.DataFrame) -> pd.DataFrame:
     z4 = pd.to_numeric(master.get("time_in_z4", pd.Series(dtype=float)), errors="coerce").fillna(0)
     z5 = pd.to_numeric(master.get("time_in_z5", pd.Series(dtype=float)), errors="coerce").fillna(0)
     master.loc[:, "time_at_threshold_min"] = (z4 + z5).round(2)
-    # Historical maximum TTE across all activities (expanding window)
-    master.loc[:, "tte_z4z5_min"] = master["time_at_threshold_min"].expanding().max().round(2)
+    # Per-activity TTE: actual Z4+Z5 minutes for this activity only.
+    # BYLO: expanding().max() → způsobovalo "expanding window leak" – jakmile
+    # jedna aktivita dosáhla vysoké hodnoty, všechny následující ji dědily
+    # i s nulovým časem v Z4/Z5. Opraveno na přímý výpočet z aktuálních dat.
+    master.loc[:, "tte_z4z5_min"] = master["time_at_threshold_min"]
     return master
 
 
