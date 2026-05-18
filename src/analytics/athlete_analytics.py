@@ -70,7 +70,7 @@ import pandas as pd
 import numpy as np
 
 from config.settings import (
-    MAX_HR as ATHLETE_MAX_HR, RESTING_HR as ATHLETE_RHR, ZONE_PCTS as ATHLETE_ZONE_PCTS,
+    MAX_HR as ATHLETE_MAX_HR, RESTING_HR as ATHLETE_RHR, ZONES as ATHLETE_ZONES,
     CTL_DAYS, ATL_DAYS, EF_WINDOW, MONOTONY_WINDOW,
     HRV_DROP_THRESHOLD, HIGH_RHR_THRESHOLD, LOW_SLEEP_SCORE,
     SHORT_SLEEP_MINUTES, ILLNESS_FLAG_COUNT,
@@ -2175,16 +2175,11 @@ def verify_analytics(
     print(f"  📊 PRODUKČNÍ REŽIM: Zpracována kompletní databáze.")
     print(f"     Aktivit v master: {len(master)}  |  Denních záznamů: {len(daily)}")
 
-    # 0b. Karvonen zóny – verifikace nových konstant (MaxHR=199, RHR=41, HRR=158)
-    _hrr = ATHLETE_MAX_HR - ATHLETE_RHR
-    _zone_labels = ["Z1", "Z2", "Z3", "Z4", "Z5"]
-    _zone_pcts   = ATHLETE_ZONE_PCTS
+    # 0b. Tepové zóny – pevná bpm (z laktátového testu)
     print()
-    print(f"  ── KARVONEN ZÓNY  (MaxHR={ATHLETE_MAX_HR}, RHR={ATHLETE_RHR}, HRR={_hrr}) ──────────────")
-    for _i, _lbl in enumerate(_zone_labels):
-        _lo = round(_zone_pcts[_i]     * _hrr + ATHLETE_RHR)
-        _hi = round(_zone_pcts[_i + 1] * _hrr + ATHLETE_RHR)
-        _bar = "■" * int((_zone_pcts[_i + 1] - _zone_pcts[_i]) * 50)
+    print(f"  ── TEPOVÉ ZÓNY  (pevné bpm) ──────────────────────────────────────")
+    for _lbl, (_lo, _hi) in ATHLETE_ZONES.items():
+        _bar = "■" * max(1, (_hi - _lo + 1) // 4)
         print(f"    {_lbl}: {_lo:3d}–{_hi:3d} bpm  [{_bar}]")
     print()
 

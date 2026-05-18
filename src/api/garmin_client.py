@@ -1746,10 +1746,10 @@ def main() -> set:
                 logger.warning(f"[WARN] Chyba při čtení {csv_path} pro detekci posledního data: {e}")
 
     if last_date is not None:
-        # ── Smart Incremental Sync: FIT existence check (last 7 days) ────
-        # Pro posledních 7 dní zkontroluj fyzickou existenci FIT souborů
+        # ── Smart Incremental Sync: FIT existence check (last 3 days) ────
+        # Pro posledních 3 dní zkontroluj fyzickou existenci FIT souborů
         # na disku. Pokud soubor chybí, naplánuj download.
-        backfill_days = 7  # vždy pokryjeme celý týden
+        backfill_days = 3  # vždy pokryjeme celý týden
         force_redownload_ids: list = []
         activities_csv = CSV_FILES["activities"]
         if activities_csv.exists():

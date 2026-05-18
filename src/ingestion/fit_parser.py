@@ -42,7 +42,7 @@ from fitparse import FitFile
 
 from config.settings import (
     MAX_HR, RESTING_HR as BASELINE_RHR, ZONE_2_CAP,
-    ZONE_PCTS, ZONE_LABELS,
+    ZONES, ZONE_LABELS,
     DEFAULT_SPEED_THRESHOLD_MS, CYCLING_SPEED_THRESHOLD_MS,
     TRIMP_K1, TRIMP_K2,
 )
@@ -130,15 +130,9 @@ log = logging.getLogger("garmin_trainer")
 # KARVONEN ZÓNY
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_zones(rhr: int, max_hr: int = MAX_HR) -> list[tuple[int, int, str]]:
-    """Vrátí [(lo_bpm, hi_bpm, label), ...] pro Z1–Z5."""
-    hrr = max_hr - rhr
-    zones = []
-    for i in range(len(ZONE_LABELS) - 1):
-        lo = round(ZONE_PCTS[i] * hrr + rhr)
-        hi = round(ZONE_PCTS[i + 1] * hrr + rhr)
-        zones.append((lo, hi, ZONE_LABELS[i]))
-    return zones
+def compute_zones(rhr: int = 0, max_hr: int = MAX_HR) -> list[tuple[int, int, str]]:
+    """Vrátí [(lo_bpm, hi_bpm, label), ...] pro Z1–Z5 (pevné bpm z nastavení)."""
+    return [(lo, hi, lbl) for lbl, (lo, hi) in ZONES.items()]
 
 
 def classify_zone(hr: Optional[int], zones: list[tuple[int, int, str]]) -> str:

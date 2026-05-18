@@ -28,11 +28,18 @@ LOGS_DIR        = PROJECT_ROOT / "logs"
 MAX_HR          = 199          # Maximum heart rate (bpm)
 RESTING_HR      = 41           # Resting heart rate (bpm)
 
-# Karvonen HR-Reserve zone boundaries (fraction of HRR)
-# Z1: 50-60%, Z2: 60-72%, Z3: 72-82%, Z4: 82-90%, Z5/Z5+: 90-100%
-ZONE_PCTS       = [0.50, 0.60, 0.72, 0.82, 0.90, 1.00]
-ZONE_LABELS     = ["Z1", "Z2", "Z3", "Z4", "Z5", "Z5+"]
-ZONE_2_CAP      = 155          # Talk-Test ceiling (bpm) ≈ 72 % HRR
+# Hardcoded heart rate zones (bpm) – measured from lactate tests / personal experience.
+# Each zone is (lower_bound_inclusive, upper_bound_inclusive).
+# Edit these values whenever your fitness changes; no formula involved.
+ZONES: dict[str, tuple[int, int]] = {
+    "Z1": (120, 136),
+    "Z2": (137, 155),
+    "Z3": (156, 171),
+    "Z4": (172, 183),
+    "Z5": (184, 199),
+}
+ZONE_LABELS     = list(ZONES.keys())   # ["Z1", "Z2", "Z3", "Z4", "Z5"]
+ZONE_2_CAP      = 155                  # Talk-Test ceiling (bpm) – top of Z2
 
 # ============================================================
 # TRAINING LOAD MODEL (Banister / PMC)
