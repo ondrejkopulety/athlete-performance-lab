@@ -32,7 +32,7 @@ RESTING_HR      = 41           # Resting heart rate (bpm)
 # Each zone is (lower_bound_inclusive, upper_bound_inclusive).
 # Edit these values whenever your fitness changes; no formula involved.
 ZONES: dict[str, tuple[int, int]] = {
-    "Z1": (120, 136),
+    "Z1": (100, 136),
     "Z2": (137, 155),
     "Z3": (156, 171),
     "Z4": (172, 183),
