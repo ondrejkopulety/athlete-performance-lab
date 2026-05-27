@@ -714,7 +714,7 @@ def compute_efficiency_index(
     Returns DataFrame indexed by date with columns: daily_efficiency, ef_trend.
     """
     cardio = master.loc[
-        master["sport"].str.contains("running", case=False, na=False)
+        master["sport"].str.contains("cycling|biking|ride|bike", case=False, na=False)
     ].copy()
 
     if cardio.empty:
@@ -906,6 +906,19 @@ def compute_pure_recovery(
     else:
         daily.loc[:, "rhr_day"] = np.nan
 
+    # ── STRESS component ─────────────────────────────────────────────────
+    if not health_df.empty and "stress_average" in health_df.columns:
+        stress = health_df[["date", "stress_average"]].dropna().copy()
+        stress = stress.assign(date=pd.to_datetime(stress["date"]))
+        stress = stress.set_index("date").sort_index()
+
+        daily = daily.join(
+            stress["stress_average"].astype(float).to_frame("avg_stress_day"),
+            how="left"
+        )
+    else:
+        daily.loc[:, "avg_stress_day"] = np.nan
+
     # ── Sleep component (30 %) ────────────────────────────────────────────
     sleep_norm = pd.Series(np.nan, index=idx, name="sleep_component")
     if not sleep_df.empty and "sleep_score" in sleep_df.columns:
@@ -933,12 +946,12 @@ def compute_pure_recovery(
     daily.loc[:, "pure_recovery_score"] = combined.clip(0, 100).round(1)
 
     # ── Sleep Performance % (Whoop-style) ────────────────────────────────
-    # sleep_need = 450 min (7.5 h base) + 0.5 * TRIMP předchozího dne + recovery_tax
+    # sleep_need = 450 min (7.5 h base) + 0.5 * TRIMP předchozího dne
+    # recovery_tax záměrně NENÍ součástí vzorce – 10 h regenerace ≠ 10 h extra spánku;
+    # extra spánek plyne pouze ze zátěže (TRIMP). Strop 780 min (13 h) brání extrémům.
     # sleep_performance = (actual_duration / sleep_need) * 100
     trimp_prev = daily["trimp"].shift(1).fillna(0)  # den předtím (první den = 0, neextrapolujeme)
-    # recovery_tax_hours je v hodinách → převod na minuty (* 60)
-    tax_prev = daily["recovery_tax_hours"].shift(1).fillna(0) * 60 if "recovery_tax_hours" in daily.columns else 0
-    sleep_need = 450 + trimp_prev * 0.5 + tax_prev
+    sleep_need = (450 + trimp_prev * 0.5).clip(upper=780)
     sleep_dur = daily["sleep_duration_min"] if "sleep_duration_min" in daily.columns else pd.Series(np.nan, index=daily.index)
     sleep_perf = (sleep_dur / sleep_need.replace(0, np.nan)) * 100
     daily.loc[:, "sleep_need_min"] = sleep_need.round(0)
@@ -1311,7 +1324,9 @@ def build_daily_trimp(master: pd.DataFrame) -> pd.DataFrame:
     daily = daily.rename(columns={"total_trimp": "trimp"})
     daily = daily.set_index("date").sort_index()
 
-    full_range = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    today = pd.Timestamp.today().normalize()
+    end_date = max(daily.index.max(), today)
+    full_range = pd.date_range(daily.index.min(), end_date, freq="D")
     daily = daily.reindex(full_range, fill_value=0.0)
     daily.index.name = "date"
 
@@ -2562,7 +2577,7 @@ def main() -> None:
         "max_hrr_60s_avg",
         # Recovery & bio
         "pure_recovery_score",
-        "rhr_day", "hrv_last_night", "hrv_weekly_avg",
+        "rhr_day", "avg_stress_day", "hrv_last_night", "hrv_weekly_avg",
         "sleep_score_day", "sleep_duration_min",
         "sleep_need_min", "sleep_performance_pct",
         "hrv_cv_pct",
@@ -2586,7 +2601,7 @@ def main() -> None:
         "daily_efficiency": 4, "ef_trend": 4,
         "readiness_score": 1, "max_hrr_60s_avg": 1,
         "pure_recovery_score": 1,
-        "rhr_day": 0, "hrv_last_night": 1, "hrv_weekly_avg": 1,
+        "rhr_day": 0, "avg_stress_day": 0, "hrv_last_night": 1, "hrv_weekly_avg": 1,
         "sleep_score_day": 0, "sleep_duration_min": 0,
         "sleep_need_min": 0, "sleep_performance_pct": 1,
         "hrv_cv_pct": 1,
