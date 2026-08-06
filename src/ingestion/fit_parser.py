@@ -1,15 +1,21 @@
 """
-fit_to_highres_csv.py  –  Garmin AI Trainer · High-Resolution FIT Processor
+fit_parser.py  –  Garmin AI Trainer · High-Resolution FIT Processor
 =============================================================================
 **Čistá extrakční vrstva** – zpracuje .fit soubory a emituje pouze data,
 která fyzicky leží uvnitř FIT souboru (record, session, hrv zprávy).
 
-Výstup:
-  • data/summaries/high_res_training_data.csv   (každý záznam ≈ 1 s aktivity)
-  • data/summaries/high_res_summary.csv          (každý řádek = 1 aktivita)
+Veřejné API:
+  • parse_fit_file(path, writer)  – streamuje vteřinové řádky do writeru
+  • parse_fit_to_memory(path)     – vrátí (summary_dict, [řádky]); picklovatelné,
+                                    použitelné v multiprocessing workeru
+
+Modul nic nezapisuje na disk. Perzistenci řeší src/ingestion/loader.py,
+který výstup ukládá rovnou do databáze. (Dřívější main() psal
+high_res_*.csv, které žádný další krok nečetl – master_rebuild si tytéž
+FIT soubory parsoval znovu. Odstraněno.)
 
 Žádné načítání externích CSV (daily_health, hrv, activities, sleep).
-Veškerá analytická logika (stress, coach_advice, recovery) → athlete_analytics.py.
+Veškerá analytická logika (stress, coach_advice, recovery) → src/analytics/.
 
 Parametry atleta
 ----------------
@@ -20,8 +26,6 @@ ZONE_2_CAP      : 155 bpm  (Talk-Test práh ≈ 72 % HRR při RHR 41)
 
 from __future__ import annotations
 
-import csv
-import glob
 import logging
 import math
 import os
@@ -42,7 +46,7 @@ from fitparse import FitFile
 
 from config.settings import (
     MAX_HR, RESTING_HR as BASELINE_RHR, ZONE_2_CAP,
-    ZONES, ZONE_LABELS,
+    ZONES, ZONE_LABELS, FIT_DIR,
     DEFAULT_SPEED_THRESHOLD_MS, CYCLING_SPEED_THRESHOLD_MS,
     TRIMP_K1, TRIMP_K2,
 )
@@ -75,11 +79,9 @@ CYCLING_SPORTS: frozenset[str] = frozenset({
     "e_bike", "bmx", "cyclocross", "track_cycling",
 })
 
-# Cesty
-FIT_FOLDER       = "data/fit"
-SUMMARY_FOLDER   = "data/summaries"
-HIGHRES_CSV      = os.path.join(SUMMARY_FOLDER, "high_res_training_data.csv")
-SUMMARY_CSV      = os.path.join(SUMMARY_FOLDER, "high_res_summary.csv")
+# Cesty ze settings – dřívější relativní "data/fit" záviselo na tom, odkud
+# se proces spustí, což na serveru (uvicorn/systemd) nefunguje.
+FIT_FOLDER = str(FIT_DIR)
 
 HIGHRES_COLS = [
     "activity_id", "timestamp", "date", "heart_rate", "speed",
@@ -751,126 +753,3 @@ def parse_fit_to_memory(
     if summary is None:
         return None
     return summary, collector.rows
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HLAVNÍ FUNKCE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _load_existing_ids(csv_path: str) -> set[str]:
-    """Načte activity_id z existujícího summary CSV do setu (pro inkrementální režim)."""
-    ids: set[str] = set()
-    if not os.path.isfile(csv_path):
-        return ids
-    try:
-        with open(csv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                aid = row.get("activity_id", "").strip()
-                if aid:
-                    ids.add(aid)
-    except Exception as exc:
-        log.warning("Nelze načíst existující IDs z %s: %s – zpracuji vše.", csv_path, exc)
-        return set()
-    return ids
-
-
-def _csv_needs_header(csv_path: str) -> bool:
-    """True pokud soubor neexistuje nebo je prázdný."""
-    if not os.path.isfile(csv_path):
-        return True
-    return os.path.getsize(csv_path) == 0
-
-
-def main(force_parse: bool = False) -> None:
-    log.info("=" * 70)
-    log.info("Garmin AI Trainer – FIT → CSV  (MAX_HR=%d bpm, baseline_RHR=%d bpm)",
-             MAX_HR, BASELINE_RHR)
-    log.info("=" * 70)
-
-    os.makedirs(SUMMARY_FOLDER, exist_ok=True)
-
-    # Zobraz dnešní zóny jako referenci (baseline RHR)
-    log.info("Karvonen zóny (baseline RHR=%d bpm):", BASELINE_RHR)
-    for lo, hi, label in compute_zones(BASELINE_RHR):
-        suffix = "  ← Z2 cap" if label == "Z2" else ""
-        log.info("  %s: %3d – %3d bpm%s", label, lo, hi, suffix)
-
-    fit_files = sorted(glob.glob(os.path.join(FIT_FOLDER, "*.fit")))
-    if not fit_files:
-        log.error("Žádné .fit soubory v %s", FIT_FOLDER)
-        return
-
-    # ── Inkrementální režim ──────────────────────────────────────────────────
-    if force_parse:
-        log.info("--force-parse: přeskakuji inkrementální kontrolu, zpracuji všech %d souborů.", len(fit_files))
-        existing_ids: set[str] = set()
-    else:
-        existing_ids = _load_existing_ids(SUMMARY_CSV)
-        if existing_ids:
-            log.info("Nalezeno %d již zpracovaných aktivit v %s.", len(existing_ids), SUMMARY_CSV)
-
-    summary_rows: list[dict] = []
-    processed = failed = skipped = 0
-
-    # ── Streaming zápis ──────────────────────────────────────────────────────
-    open_mode = "w" if force_parse else "a"
-    write_highres_header = force_parse or _csv_needs_header(HIGHRES_CSV)
-    write_summary_header = force_parse or _csv_needs_header(SUMMARY_CSV)
-
-    with (
-        open(HIGHRES_CSV, open_mode, newline="", encoding="utf-8") as fh,
-        open(SUMMARY_CSV, open_mode, newline="", encoding="utf-8") as sf,
-    ):
-        hr_writer = csv.DictWriter(fh, fieldnames=HIGHRES_COLS)
-        sm_writer = csv.DictWriter(sf, fieldnames=SUMMARY_COLS)
-
-        if write_highres_header:
-            hr_writer.writeheader()
-        if write_summary_header:
-            sm_writer.writeheader()
-
-        for i, fit_path in enumerate(fit_files, 1):
-            fname = os.path.basename(fit_path)
-            if not force_parse and extract_activity_id(fit_path) in existing_ids:
-                log.info("[INFO] Soubor %s již existuje, přeskakuji parse.", fname)
-                skipped += 1
-                continue
-
-            log.info("─── [%d/%d] %s", i, len(fit_files), fname)
-            result = parse_fit_file(fit_path, hr_writer)
-            if result is not None:
-                sm_writer.writerow(result)
-                summary_rows.append(result)
-                processed += 1
-            else:
-                failed += 1
-            if i % 10 == 0:
-                fh.flush()
-                sf.flush()
-
-    if processed == 0 and failed == 0:
-        log.info("Všech %d aktivit již zpracováno – nic nového.", len(fit_files))
-        return
-
-    log.info("=" * 70)
-    log.info("DOKONČENO  Zpracováno: %d aktivit  |  Chyb: %d  |  Přeskočeno: %d",
-             processed, failed, skipped)
-    if summary_rows:
-        trimps = [r["total_trimp"] for r in summary_rows if r["total_trimp"]]
-        log.info("Celkový TRIMP:          %.1f", sum(trimps))
-        log.info("Průměrný TRIMP/aktivita:%.1f", mean(trimps) if trimps else 0)
-    log.info("High-res CSV : %s", HIGHRES_CSV)
-    log.info("Summary CSV  : %s", SUMMARY_CSV)
-    log.info("")
-    log.info("Upgrade dokončen: Extrahováno %d nových metrik u %d aktivit.", 14, processed)
-    log.info("=" * 70)
-
-
-if __name__ == "__main__":
-    import argparse as _ap
-    _parser = _ap.ArgumentParser(description="FIT → CSV parser")
-    _parser.add_argument("--force-parse", action="store_true",
-                         help="Přeparsuj vše od nuly (ignoruj inkrementální kontrolu)")
-    _args = _parser.parse_args()
-    main(force_parse=_args.force_parse)

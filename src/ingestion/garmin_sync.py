@@ -1809,8 +1809,11 @@ def main() -> set:
             "[INFO] Metrika AKTIVITY nenalezena (404). Přeskakuji."
         )
     except GarminRateLimitError as e:
+        # Dřív se tu volalo sys.exit(1). To je v pořádku pro CLI, ale
+        # zabilo by celý uvicorn proces, kdyby sync běžel z API. Výjimka
+        # nechá rozhodnutí na volajícím.
         logger.error(f"[FATAL] {e}")
-        sys.exit(1)
+        raise
     except Exception as e:
         logger.warning(f"[WARN] Chyba při synchronizaci AKTIVITY: {e}. Přeskakuji.")
 
@@ -1842,7 +1845,7 @@ def main() -> set:
                 f"[FATAL] Rate limit hit u metriky {metric_name}. "
                 f"Wait 60 min. Detail: {e}"
             )
-            sys.exit(1)
+            raise
         except Exception as e:
             logger.warning(
                 f"[WARN] Chyba při synchronizaci {metric_name}: {e}. Přeskakuji."

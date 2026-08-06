@@ -9,6 +9,20 @@ numpy>=1.24
 scipy>=1.10
 scikit-learn>=1.2
 
+# ── Database (PostgreSQL + TimescaleDB) ──────────────────────
+SQLAlchemy>=2.0
+alembic>=1.13
+psycopg[binary]>=3.1
+
+# ── Web API ──────────────────────────────────────────────────
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+APScheduler>=3.10
+
+# ── Testing ──────────────────────────────────────────────────
+pytest>=8.0
+
 # ── FIT file parsing ─────────────────────────────────────────
 fitparse>=1.2.0
 

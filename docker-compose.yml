@@ -1,0 +1,34 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: garmin_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-garmin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-garmin}
+      POSTGRES_DB: ${POSTGRES_DB:-garmin}
+      # Timescale ladí tyhle hodnoty samo, ale u lokálního single-user setupu
+      # se vyplatí dát COPY importu (556 MB records) víc paměti.
+      TIMESCALEDB_TELEMETRY: "off"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - garmin_pgdata:/var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=512MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-garmin} -d ${POSTGRES_DB:-garmin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  garmin_pgdata:

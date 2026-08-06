@@ -1,33 +1,36 @@
 """
-master_rebuild.py  –  Master Training Database Rebuild
-=======================================================
+dedup.py  –  Výběr kanonické sady FIT souborů
+==============================================
 Sloučí Garmin (data/fit/) a Strava (data/fit/strava_originals/) FIT soubory
-do jedné čisté tréninkové databáze *bez duplicit*.
+do jednoho seznamu *bez duplicit*.  Zápis do databáze řeší `loader.py`.
 
 Deduplikace (±30 min) – priorita snímač tepové frekvence → hustota dat:
+  0. Pojistka integrity: soubor s >25 % více záznamy vyhrává (druhý je oříznutý).
   1. Snímač: Hrudní pás (ANT+ device_type 120) > Optický snímač (zápěstí).
      • Případ A: Garmin má hrudní pás  → Garmin vždy vítězí.
      • Případ B: Garmin má optiku, Strava má hrudní pás → vítězí Strava.
+     • Případ B2: device_info chybí → hrudní pás se pozná podle HRV zpráv.
      • Případ C: Ani jeden nemá hrudní pás → Garmin (výchozí zdroj).
   2. Pojistka – stejný typ snímače: rozhoduje hustota HR dat (≥ 90 % vzorků).
   3. Při shodě: větší soubor.
 
-Výstup (režim 'w' – vždy od nuly):
-  • data/summaries/master_high_res_training_data.csv
-  • data/summaries/master_high_res_summary.csv
+Metadata každého FIT souboru se kešují v data/summaries/metadata_cache.json
+podle mtime, takže opakovaný běh nemusí soubory znovu otevírat.
+
+Historie: tento modul vznikl z master_rebuild.py; rozhodovací logika je
+zachována beze změny, odstraněn byl jen zápis do CSV.
 """
 
 from __future__ import annotations
 
-import csv
 import glob
+import hashlib
 import json
 import logging
 import multiprocessing as mp
 import os
 import sys
 from datetime import datetime, timedelta
-from statistics import mean
 from typing import Optional
 
 # ── Project root on sys.path for config import ────────────────────────────────
@@ -42,30 +45,21 @@ from config.settings import (
     ANT_DEVICE_TYPE_HR, INTEGRITY_DIFF_PCT,
 )
 
-# Import sdílené logiky z fit_parser (formerly fit_to_highres_csv.py)
-from src.ingestion.fit_parser import (
-    BASELINE_RHR,
-    HIGHRES_COLS,
-    MAX_HR,
-    SUMMARY_COLS,
-    SUMMARY_FOLDER,
-    extract_activity_id,
-    parse_fit_file,
-    parse_fit_to_memory,
-    _to_naive_utc,
-)
+from config.settings import FIT_DIR, STRAVA_FIT_DIR, SUMMARIES_DIR
+
+# Import sdílené logiky z fit_parser
+from src.ingestion.fit_parser import extract_activity_id, _to_naive_utc
 
 # ─────────────────────────────────────────────────────────────────────────────
 # KONFIGURACE
 # ─────────────────────────────────────────────────────────────────────────────
 
-GARMIN_FIT_FOLDER  = "data/fit"
-STRAVA_FIT_FOLDER  = "data/fit/strava_originals"
+# Absolutní cesty ze settings – dřívější relativní "data/fit" se rozbíjelo
+# při spuštění z jiného pracovního adresáře (např. z uvicorn v systemd).
+GARMIN_FIT_FOLDER  = str(FIT_DIR)
+STRAVA_FIT_FOLDER  = str(STRAVA_FIT_DIR)
 
-METADATA_CACHE_FILE = os.path.join(SUMMARY_FOLDER, "metadata_cache.json")
-
-MASTER_HIGHRES_CSV = os.path.join(SUMMARY_FOLDER, "master_high_res_training_data.csv")
-MASTER_SUMMARY_CSV = os.path.join(SUMMARY_FOLDER, "master_high_res_summary.csv")
+METADATA_CACHE_FILE = str(SUMMARIES_DIR / "metadata_cache.json")
 
 DEDUP_WINDOW          = timedelta(minutes=DEDUP_WINDOW_MIN)
 
@@ -88,17 +82,7 @@ SENSOR_UNKNOWN = "unknown"  # nelze určit
 # LOGGING
 # ─────────────────────────────────────────────────────────────────────────────
 
-os.makedirs("logs", exist_ok=True)
-log = logging.getLogger("master_rebuild")
-log.setLevel(logging.INFO)
-log.propagate = False          # ← nepropagovat do root loggeru z fit_to_highres_csv
-if not log.handlers:
-    _fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S")
-    _sh = logging.StreamHandler(sys.stdout)
-    _sh.setFormatter(_fmt)
-    _fh = logging.FileHandler("logs/master_rebuild.log", mode="w", encoding="utf-8")
-    _fh.setFormatter(_fmt)
-    log.handlers = [_sh, _fh]
+log = logging.getLogger("dedup")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -674,216 +658,36 @@ def _pick_winner(a: dict, b: dict) -> tuple[dict, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HLAVNÍ FUNKCE
+# VEŘEJNÉ API
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    log.info("=" * 72)
-    log.info("MASTER REBUILD – Čistá tréninková databáze (Garmin + Strava)")
-    log.info("  MAX_HR=%d bpm, baseline_RHR=%d bpm", MAX_HR, BASELINE_RHR)
-    log.info("  Deduplikační okno: ±%d min | HR density: %.0f%% | Integrity: ±%.0f%% | ANT+ HR: %d",
-             int(DEDUP_WINDOW.total_seconds() / 60), HR_DENSITY_THRESHOLD * 100,
-             INTEGRITY_DIFF_PCT * 100, ANT_DEVICE_TYPE_HR)
-    log.info("=" * 72)
-
-    os.makedirs(SUMMARY_FOLDER, exist_ok=True)
-
-    # 1. Sběr a deduplikace
-    all_entries, _cache_hits, _fresh_count = collect_fit_files()
-
-    unique_entries = deduplicate(all_entries)
-
-    if not unique_entries:
-        log.error("Žádné aktivity k zpracování. Ukončuji.")
-        return
-
-    # ── Inkrementální režim: přeskoč již zpracované aktivity ────────────────
-    existing_ids: set[str] = set()
-    if os.path.isfile(MASTER_SUMMARY_CSV):
-        try:
-            with open(MASTER_SUMMARY_CSV, "r", encoding="utf-8") as ef:
-                reader = csv.DictReader(ef)
-                for row in reader:
-                    aid = row.get("activity_id", "").strip()
-                    if aid:
-                        existing_ids.add(aid)
-            log.info("Nalezeno %d již zpracovaných aktivit v master summary.", len(existing_ids))
-        except Exception as exc:
-            log.warning("Nelze načíst existující IDs z %s: %s – zpracuji vše.", MASTER_SUMMARY_CSV, exc)
-            existing_ids = set()
-
-    new_entries = [
-        e for e in unique_entries
-        if extract_activity_id(e["path"]) not in existing_ids
-    ]
-    skipped = len(unique_entries) - len(new_entries)
-
-    if not new_entries:
-        log.info("Všech %d aktivit již zpracováno – nic nového k updatu.", len(unique_entries))
-        return
-
-    # 2. Zpracování – streaming do master CSV (append)
-    summary_rows: list[dict] = []
-    processed = failed = 0
-
-    log.info("─" * 72)
-    log.info("Zahajuji zpracování %d nových aktivit (%d přeskočeno)...",
-             len(new_entries), skipped)
-    log.info("─" * 72)
-
-    paths = [e["path"] for e in new_entries]
-    cpu_count = max(1, mp.cpu_count() - 1)
-    log.info("Paralelní parsování FIT souborů (%d CPU)...", cpu_count)
-
-    master_summary_cols = SUMMARY_COLS + ["source"]
-
-    def _csv_needs_header(path: str) -> bool:
-        return not os.path.isfile(path) or os.path.getsize(path) == 0
-
-    write_highres_header = _csv_needs_header(MASTER_HIGHRES_CSV)
-    write_summary_header = _csv_needs_header(MASTER_SUMMARY_CSV)
-
-    with (
-        open(MASTER_HIGHRES_CSV, "a", newline="", encoding="utf-8") as fh,
-        open(MASTER_SUMMARY_CSV, "a", newline="", encoding="utf-8") as sf,
-    ):
-        hr_writer = csv.DictWriter(fh, fieldnames=HIGHRES_COLS)
-        sm_writer = csv.DictWriter(sf, fieldnames=master_summary_cols)
-
-        if write_highres_header:
-            hr_writer.writeheader()
-        if write_summary_header:
-            sm_writer.writeheader()
-
-        # pool.imap preserves input order; each worker returns
-        # (summary_dict, highres_rows) or None on failure.
-        with mp.Pool(processes=cpu_count) as pool:
-            for i, (entry, result) in enumerate(
-                zip(new_entries, pool.imap(parse_fit_to_memory, paths, chunksize=4)),
-                1,
-            ):
-                src_tag = f"[{entry['source'].upper():6s}]"
-                log.info("─── [%d/%d] %s %s",
-                         i, len(new_entries), src_tag,
-                         os.path.basename(entry["path"]))
-
-                if result is not None:
-                    summary, highres_rows = result
-                    for row in highres_rows:
-                        hr_writer.writerow(row)
-                    summary["source"] = entry["source"]
-                    sm_writer.writerow(summary)
-                    summary_rows.append(summary)
-                    processed += 1
-                else:
-                    failed += 1
-
-                if i % 10 == 0:
-                    fh.flush()
-                    sf.flush()
-
-    # 4. Statistiky
-    # Počet nových metrik (sloupce přidané nad rámec původních 16)
-    NEW_METRIC_NAMES = [
-        "distance_km", "ascent_m", "descent_m", "avg_speed_kmh", "max_speed_kmh",
-        "calories", "avg_cadence", "max_cadence", "avg_temp", "max_temp",
-        "training_effect_aerobic", "training_effect_anaerobic", "vo2_max",
-    ]
-    new_metrics_count = len(NEW_METRIC_NAMES)
-
-    log.info("=" * 72)
-    log.info("DOKONČENO")
-    log.info("  Zpracováno: %d aktivit  |  Chyb: %d  |  Přeskočeno: %d",
-             processed, failed, skipped)
-
-    garmin_count = sum(1 for r in summary_rows if r.get("source") == SOURCE_GARMIN)
-    strava_count = sum(1 for r in summary_rows if r.get("source") == SOURCE_STRAVA)
-    log.info("  Z toho Garmin: %d  |  Strava: %d", garmin_count, strava_count)
-
-    if summary_rows:
-        trimps = [r["total_trimp"] for r in summary_rows if r["total_trimp"]]
-        if trimps:
-            log.info("  Celkový TRIMP:           %.1f", sum(trimps))
-            log.info("  Průměrný TRIMP/aktivita: %.1f", mean(trimps))
-
-    log.info("  High-res CSV: %s", MASTER_HIGHRES_CSV)
-    log.info("  Summary CSV:  %s", MASTER_SUMMARY_CSV)
-    log.info("")
-    log.info("Upgrade dokončen: Extrahováno %d nových metrik u %d aktivit.",
-             new_metrics_count, processed)
-    log.info("  Metadata cache: %d soubor(ů) z cache, %d zpracováno znovu.",
-             _cache_hits, _fresh_count)
-    log.info("=" * 72)
-
-    # 5. Merge VO2 Max from external CSV (Garmin FIT files rarely contain it)
-    _merge_vo2_max(MASTER_SUMMARY_CSV)
-
-
-def _merge_vo2_max(summary_csv: str) -> None:
+def file_sha256(path: str, chunk_size: int = 1 << 20) -> str:
     """
-    Napojí sloupec vo2_max ze souboru data/summaries/vo2_max.csv do master
-    summary CSV pomocí LEFT JOIN přes sloupec 'date'.
+    SHA-256 obsahu souboru – identita, na které stojí inkrementální načítání.
 
-    Formát vo2_max.csv (minimální):
-        date,vo2_max
-        2024-03-15,58.2
-        2024-05-01,57.8
-        ...
-
-    Pravidla:
-    • Hodnoty v CSV mají přednost před hodnotami z FIT souborů (vždy "").
-    • Pokud pro daný den existuje více aktivit, stejná hodnota se aplikuje na všechny.
-    • Pokud vo2_max.csv neexistuje, funkce tiše skončí bez chyby.
-    • Pokud je vo2_max.csv prázdný nebo nemá správné sloupce, zapíše varování.
+    mtime nestačí: Strava re-export nebo zkopírování souboru mtime změní,
+    aniž by se změnil obsah, a naopak `touch` by vynutil zbytečný re-import.
     """
-    import pandas as pd  # local import – master_rebuild otherwise uses only stdlib
-
-    VO2_CSV = os.path.join(SUMMARY_FOLDER, "vo2_max.csv")
-    if not os.path.isfile(VO2_CSV):
-        log.info("[VO2 Max] %s nenalezen – přeskočeno.", VO2_CSV)
-        return
-    if not os.path.isfile(summary_csv):
-        log.warning("[VO2 Max] Summary CSV %s neexistuje – přeskočeno.", summary_csv)
-        return
-
-    try:
-        vo2_df = pd.read_csv(VO2_CSV, dtype=str)
-        if "date" not in vo2_df.columns or "vo2_max" not in vo2_df.columns:
-            log.warning("[VO2 Max] %s musí obsahovat sloupce 'date' a 'vo2_max'.", VO2_CSV)
-            return
-
-        vo2_df = vo2_df[["date", "vo2_max"]].copy()
-        vo2_df["date"] = pd.to_datetime(vo2_df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        vo2_df = vo2_df.dropna(subset=["date"]).drop_duplicates("date")
-
-        summary_df = pd.read_csv(summary_csv, dtype=str)
-        if "date" not in summary_df.columns:
-            log.warning("[VO2 Max] Summary CSV nemá sloupec 'date' – přeskočeno.")
-            return
-
-        summary_df["date"] = pd.to_datetime(summary_df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-
-        # Drop the empty vo2_max column that fit_parser writes, then merge
-        if "vo2_max" in summary_df.columns:
-            summary_df = summary_df.drop(columns=["vo2_max"])
-
-        merged = summary_df.merge(vo2_df, on="date", how="left")
-
-        # Preserve original column order: insert vo2_max after training_effect_anaerobic
-        cols = list(merged.columns)
-        if "vo2_max" in cols and "training_effect_anaerobic" in cols:
-            cols.remove("vo2_max")
-            idx = cols.index("training_effect_anaerobic") + 1
-            cols.insert(idx, "vo2_max")
-            merged = merged[cols]
-
-        merged.to_csv(summary_csv, index=False)
-        filled = merged["vo2_max"].notna().sum()
-        log.info("[VO2 Max] Doplněno %d hodnot VO2 Max do %s.", filled, summary_csv)
-
-    except Exception as exc:
-        log.error("[VO2 Max] Chyba při merge: %s", exc)
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(chunk_size):
+            h.update(chunk)
+    return h.hexdigest()
 
 
-if __name__ == "__main__":
-    main()
+def canonical_fit_files() -> list[dict]:
+    """
+    Vrátí deduplikovaný seznam FIT souborů, které mají tvořit databázi.
+
+    Každá položka: {path, source, start_time, file_size, activity_id, _meta}.
+    """
+    entries, cache_hits, fresh = collect_fit_files()
+    unique = deduplicate(entries)
+    log.info(
+        "Kanonická sada: %d aktivit (metadata: %d z cache, %d čerstvě).",
+        len(unique), cache_hits, fresh,
+    )
+    for e in unique:
+        e["activity_id"] = extract_activity_id(e["path"])
+    return unique
+

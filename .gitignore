@@ -45,6 +45,12 @@ logs/
 *.log
 !logs/.gitkeep
 
+# ---------- Database ----------
+# Data žijí v Docker volume (garmin_pgdata), ne v repu.
+# Schéma je verzované v alembic/versions/ – to se commituje.
+*.sqlite
+*.db
+
 # ---------- OS & IDE ----------
 .DS_Store
 Thumbs.db

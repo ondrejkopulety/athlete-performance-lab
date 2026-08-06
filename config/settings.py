@@ -6,12 +6,17 @@ Edit this file to match YOUR physiology – never hardcode values
 in individual scripts.
 """
 
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # ============================================================
 # PROJECT PATHS (relative to project root)
 # ============================================================
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+load_dotenv(PROJECT_ROOT / ".env")
 
 DATA_DIR        = PROJECT_ROOT / "data"
 RAW_DIR         = DATA_DIR / "raw"
@@ -188,3 +193,237 @@ CARDIO_SPORTS: frozenset[str] = frozenset({
     "running", "trail_running", "treadmill_running",
     "track_running", "ultra_running",
 })
+
+# ============================================================
+# DATABASE
+# ============================================================
+DATABASE_URL: str = os.getenv("DATABASE_URL") or (
+    "postgresql+psycopg://"
+    f"{os.getenv('POSTGRES_USER', 'garmin')}:"
+    f"{os.getenv('POSTGRES_PASSWORD', 'garmin')}@"
+    f"{os.getenv('POSTGRES_HOST', 'localhost')}:"
+    f"{os.getenv('POSTGRES_PORT', '5432')}/"
+    f"{os.getenv('POSTGRES_DB', 'garmin')}"
+)
+
+# ============================================================
+# ANALYTICS VERSIONING & INCREMENTAL WINDOW
+# ============================================================
+# Bump when a per-activity formula changes → vynutí přepočet activity_metrics
+# u všech aktivit (řádky s nižší verzí se považují za zastaralé).
+ACTIVITY_METRICS_VERSION: int = 1
+
+# Bump when a daily formula changes → vynutí full rebuild daily_metrics.
+DAILY_METRICS_VERSION: int = 1
+
+# Kolik dní historie načíst před prvním "dirty" dnem, aby rolling okna
+# (monotony 7d, ACWR 7/28d, polarizace 14d, HRV z-score 30d, strain kvantil 30d)
+# měla plný kontext. Musí být >= nejdelší rolling okno; 45 dává rezervu.
+# CTL/ATL (EMA) se neseeduje warm-upem, ale uloženou hodnotou z předchozího dne.
+LOOKBACK_DAYS: int = 45
+
+# ============================================================
+# API
+# ============================================================
+API_CORS_ORIGINS: list[str] = [
+    o.strip() for o in os.getenv("API_CORS_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
+SYNC_CRON_HOUR: int | None = (
+    int(os.environ["SYNC_CRON_HOUR"]) if os.getenv("SYNC_CRON_HOUR", "").strip() else None
+)
+
+# ============================================================
+# METRIC METADATA  –  glosář pro AI trenéra (/coach/context)
+# ============================================================
+# Jediná definice významu metrik. LLM bez tohohle neví, že u hrv_cv_pct je
+# nižší lepší, nebo že ACWR má sweet spot uprostřed, ne na kraji.
+#
+#   unit      – jednotka (pro formulaci odpovědi)
+#   direction – higher_is_better | lower_is_better | sweet_spot | higher_is_fresher
+#   note      – jak se metrika počítá / co znamená
+#   bands     – interpretační pásma (volitelné)
+METRIC_META: dict[str, dict] = {
+    # ── Tréninková zátěž (PMC) ─────────────────────────────────────────────
+    "ctl": {
+        "unit": "TRIMP/den", "direction": "higher_is_better",
+        "note": f"Chronic Training Load – exponenciální průměr TRIMP za {CTL_DAYS} dní "
+                "(alpha=1/N). Proxy pro fitness.",
+    },
+    "atl": {
+        "unit": "TRIMP/den", "direction": "neutral",
+        "note": f"Acute Training Load – exponenciální průměr TRIMP za {ATL_DAYS} dní. "
+                "Proxy pro aktuální únavu.",
+    },
+    "tsb": {
+        "unit": "TRIMP/den", "direction": "higher_is_fresher",
+        "note": "Training Stress Balance = CTL − ATL z PŘEDCHOZÍHO dne. "
+                "Posun o den záměrně: reprezentuje ranní formu před dnešním tréninkem.",
+        "bands": {
+            "< -30": "vysoké riziko zranění, nutný odpočinek",
+            "-30 až -10": "optimální tréninková zátěž",
+            "-10 až 5": "udržovací režim",
+            "> 10": "čerstvost, připravenost na výkon",
+        },
+    },
+    "trimp": {
+        "unit": "TRIMP", "direction": "neutral",
+        "note": "Banisterův TRIMP za den (součet přes aktivity). "
+                "Hiking/walking má koeficient 0.6, aby dlouhé Z1 túry nenafoukly PMC.",
+    },
+    # ── Riziko ─────────────────────────────────────────────────────────────
+    "acwr": {
+        "unit": "poměr", "direction": "sweet_spot", "sweet_spot": [0.8, 1.3],
+        "note": f"Acute:Chronic Workload Ratio – {ACWR_ACUTE_DAYS}d průměr / "
+                f"{ACWR_CHRONIC_DAYS}d průměr, počítáno z EPOC-vážené TRIMP. Neclipováno.",
+        "bands": {
+            "< 0.8": "undertrained, ztráta formy",
+            "0.8 až 1.3": "sweet spot",
+            "1.3 až 1.5": "zvýšené riziko",
+            "> 1.5": "danger zone, hrozí zranění",
+        },
+    },
+    "ctl_ramp_rate": {
+        "unit": "CTL/týden", "direction": "sweet_spot", "sweet_spot": [0, CTL_RAMP_WARN],
+        "note": f"Týdenní přírůstek CTL (CTL − CTL před 7 dny). "
+                f"Nad {CTL_RAMP_WARN} hrozí burn-out.",
+    },
+    "illness_warning": {
+        "unit": "bool", "direction": "lower_is_better",
+        "note": f"True když je současně aktivních >= {ILLNESS_FLAG_COUNT} varovných vlajek "
+                "(pokles HRV, vysoký RHR, špatný spánek, vysoký strain při nízké regeneraci).",
+    },
+    # ── Kvalita tréninku ───────────────────────────────────────────────────
+    "monotony": {
+        "unit": "poměr", "direction": "lower_is_better",
+        "note": f"Foster monotony – mean/std denního TRIMP v {MONOTONY_WINDOW}d okně, "
+                "stropováno na 4.0. Vysoká monotonie = málo variability = riziko.",
+        "bands": {"< 1.5": "dobrá variabilita", "1.5 až 2.0": "zvýšená", "> 2.0": "vysoká, přidej lehký/volný den"},
+    },
+    "strain": {
+        "unit": "TRIMP", "direction": "neutral",
+        "note": "Foster strain = monotony × součet TRIMP za 7 dní.",
+    },
+    "whoop_strain": {
+        "unit": "0–21", "direction": "neutral",
+        "note": "Logaritmický strain 21 × (1 − exp(−0.005 × denní TRIMP)).",
+    },
+    "polarization_low_pct": {
+        "unit": "%", "direction": "sweet_spot", "sweet_spot": [75, 85],
+        "note": "Podíl času v Z1+Z2 za 14 dní ze VŠECH zón. Seilerův cíl je ~80 %.",
+    },
+    "polarization_high_pct": {
+        "unit": "%", "direction": "sweet_spot", "sweet_spot": [15, 25],
+        "note": "Podíl času v Z4+Z5 za 14 dní ze všech zón. Seilerův cíl je ~20 %.",
+    },
+    "z3_junk_pct": {
+        "unit": "%", "direction": "lower_is_better",
+        "note": "Podíl času v Z3 ('junk miles') za 14 dní – šedá zóna, "
+                "ani regenerace ani vědomá intenzita.",
+        "bands": {"<= 5": "ok", "5 až 15": "zvýšené", "> 15": "sniž Z3"},
+    },
+    "fatigue_index": {
+        "unit": "poměr", "direction": "lower_is_better",
+        "note": "Dnešní efektivita (TRIMP/km) / 7denní průměr. > 1.0 = organismus "
+                "reaguje hůř na stejnou práci = skrytá únava.",
+    },
+    # ── Regenerace a biometrie ─────────────────────────────────────────────
+    "readiness_score": {
+        "unit": "0–100", "direction": "higher_is_better",
+        "note": "Bio-Readiness. Moderní mód (jsou-li HRV i spánek): "
+                "0.30×HRV z-score + 0.30×sleep_score + 0.40×normalizované TSB. "
+                "Legacy mód (bez biometrie): pouze funkce TSB.",
+    },
+    "pure_recovery_score": {
+        "unit": "0–100", "direction": "higher_is_better",
+        "note": "0.40×HRV (vs 7denní baseline) + 0.30×RHR (vs 14denní baseline) "
+                "+ 0.30×sleep_score. Nezávislé na tréninkové zátěži.",
+        "bands": {">= 80": "výborná", "60 až 80": "dobrá", "40 až 60": "snížená", "< 40": "nízká, sniž intenzitu"},
+    },
+    "hrv_last_night": {
+        "unit": "ms", "direction": "higher_is_better",
+        "note": "Noční průměr RMSSD z Garminu. Absolutní hodnota je individuální – "
+                "vždy porovnávej s hrv_weekly_avg, ne s populačními normami.",
+    },
+    "hrv_cv_pct": {
+        "unit": "%", "direction": "lower_is_better",
+        "note": "7denní koeficient variace HRV (std/mean z hrubého RMSSD). "
+                "Vysoká variabilita HRV = nestabilní autonomní systém.",
+        "bands": {"< 10": "stabilní", "10 až 15": "zvýšený", "> 15": "vysoký stres"},
+    },
+    "rhr_day": {
+        "unit": "bpm", "direction": "lower_is_better",
+        "note": f"Klidový tep. Nad {HIGH_RHR_THRESHOLD} bpm se aktivuje varovná vlajka.",
+    },
+    "avg_stress_day": {
+        "unit": "0–100", "direction": "lower_is_better",
+        "note": "Celodenní průměrný Garmin stres skóre.",
+    },
+    "sleep_score_day": {
+        "unit": "0–100", "direction": "higher_is_better",
+        "note": f"Garmin sleep score. Pod {LOW_SLEEP_SCORE} se aktivuje varovná vlajka.",
+    },
+    "sleep_duration_min": {
+        "unit": "min", "direction": "higher_is_better",
+        "note": f"Celková délka spánku. Pod {SHORT_SLEEP_MINUTES} min (6 h) varovná vlajka.",
+    },
+    "sleep_need_min": {
+        "unit": "min", "direction": "neutral",
+        "note": "Odhad potřeby spánku = 450 min (7.5 h) + 0.5 × TRIMP předchozího dne, "
+                "strop 780 min (13 h).",
+    },
+    "sleep_performance_pct": {
+        "unit": "%", "direction": "higher_is_better",
+        "note": "sleep_duration_min / sleep_need_min × 100 (Whoop-style).",
+    },
+    # ── Per-activity fyziologie ────────────────────────────────────────────
+    "cardiac_drift": {
+        "unit": "%", "direction": "lower_is_better",
+        "note": "Aerobní decoupling Pa:HR. Po 10min rozjezdu se aktivita dělí na "
+                "poloviny podle času; EF = power/HR (kolo) nebo speed/HR (běh). "
+                "Drift = (EF1 − EF2) / EF1 × 100.",
+        "bands": {"< 5": "dobrá aerobní odolnost", "> 5": "decoupling, únava nebo horko"},
+    },
+    "max_hrr_60s": {
+        "unit": "bpm", "direction": "higher_is_better",
+        "note": "Maximální pokles tepu za 60 s (resample na 1 s, filtry proti "
+                "senzorovým glitchům). Vyšší = lepší parasympatická reaktivace.",
+    },
+    "durability_pct": {
+        "unit": "%", "direction": "higher_is_better",
+        "note": "Změna efektivity mezi 1. a 2. polovinou aktivity delší než 2 h. "
+                "Záporné = pokles výkonu = únava.",
+    },
+    "vam_m_per_h": {
+        "unit": "m/h", "direction": "higher_is_better",
+        "note": "Velocità Ascensionale Media = převýšení / čas do kopce. "
+                "Jen pro aktivity s průměrným gradientem > 4 %.",
+    },
+    "aet_hr_dfa": {
+        "unit": "bpm", "direction": "higher_is_better",
+        "note": f"Aerobní práh z DFA-alpha1 = {DFA_AET_THRESHOLD} (neurokit2 nad R-R "
+                "intervaly). Fallback proxy z linearity HR vs rychlost.",
+    },
+    "ant_hr_dfa": {
+        "unit": "bpm", "direction": "higher_is_better",
+        "note": f"Anaerobní práh z DFA-alpha1 = {DFA_ANT_THRESHOLD}.",
+    },
+    "resp_rate_rsa": {
+        "unit": "dechů/min", "direction": "neutral",
+        "note": "Dechová frekvence z respirační sinusové arytmie (Welch PSD "
+                "nad R-R intervaly, pásmo 0.15–0.50 Hz).",
+    },
+    "epoc_score": {
+        "unit": "body", "direction": "neutral",
+        "note": "Proxy kyslíkového dluhu = minuty v Z4 × 2 + minuty v Z5 × 5.",
+    },
+    "recovery_tax_hours": {
+        "unit": "h", "direction": "lower_is_better",
+        "note": "Odhad hodin snížené kapacity = min(96, 0.08 × TRIMP^1.2).",
+    },
+    "tati_score": {
+        "unit": "bpm·min", "direction": "neutral",
+        "note": "Time Above Threshold Impulse – akumulovaná práce nad Critical HR "
+                "(Monod-Scherrer adaptovaný na tep).",
+    },
+}

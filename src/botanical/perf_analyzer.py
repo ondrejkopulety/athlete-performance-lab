@@ -56,10 +56,12 @@ from config.settings import (
     SUMMARIES_DIR,
 )
 
-# ── Import advanced algorithms from athlete_analytics ─────────────────────
-from src.analytics.athlete_analytics import (
-    cardiac_drift_for_activity,
-    max_hrr_60s_for_activity,
+# ── Import advanced algorithms from the analytics layer ───────────────────
+# Dříve z athlete_analytics.py; ten se rozpadl na moduly a tyhle dvě funkce
+# se přestěhovaly beze změny logiky do src/analytics/activity.py.
+from src.analytics.activity import (
+    cardiac_drift as cardiac_drift_for_activity,
+    max_hrr_60s as max_hrr_60s_for_activity,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
