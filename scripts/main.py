@@ -128,7 +128,7 @@ def step_sync() -> tuple[bool, set]:
         return False, set()
 
 
-def step_parse() -> bool:
+def step_parse(force_parse: bool = False) -> bool:
     """Step 2 – Parse FIT files to high-resolution CSV.
 
     Returns True if parse completed successfully.
@@ -138,7 +138,7 @@ def step_parse() -> bool:
     log.info("=" * 60)
     try:
         from src.ingestion.fit_parser import main as parse_main
-        parse_main()
+        parse_main(force_parse=force_parse)
         return True
     except ImportError:
         log.warning("fit_parser not available – skipping parse.")
@@ -242,6 +242,11 @@ def main() -> None:
         action="store_true",
         help="Force all steps even if upstream data unchanged",
     )
+    parser.add_argument(
+        "--force-parse",
+        action="store_true",
+        help="Ignoruj inkrementální kontrolu a přeparsuj všechny FIT soubory od nuly",
+    )
     args = parser.parse_args()
 
     log.info("Garmin Training Analytics  ·  Pipeline Start")
@@ -294,6 +299,8 @@ def main() -> None:
         # ── Execute step ─────────────────────────────────────────────────
         if name == "sync":
             ok, dirty_activity_ids = step_sync()
+        elif name == "parse":
+            ok = step_parse(force_parse=args.force_parse)
         else:
             ok = STEPS[name]()
         results[name] = ok

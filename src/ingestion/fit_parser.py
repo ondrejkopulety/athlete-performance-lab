@@ -782,7 +782,7 @@ def _csv_needs_header(csv_path: str) -> bool:
     return os.path.getsize(csv_path) == 0
 
 
-def main() -> None:
+def main(force_parse: bool = False) -> None:
     log.info("=" * 70)
     log.info("Garmin AI Trainer – FIT → CSV  (MAX_HR=%d bpm, baseline_RHR=%d bpm)",
              MAX_HR, BASELINE_RHR)
@@ -801,34 +801,26 @@ def main() -> None:
         log.error("Žádné .fit soubory v %s", FIT_FOLDER)
         return
 
-    # ── Inkrementální režim: přeskoč již zpracované aktivity ────────────────
-    existing_ids = _load_existing_ids(SUMMARY_CSV)
-    if existing_ids:
-        log.info("Nalezeno %d již zpracovaných aktivit v %s.", len(existing_ids), SUMMARY_CSV)
-
-    new_fit_files = [
-        f for f in fit_files
-        if extract_activity_id(f) not in existing_ids
-    ]
-    skipped = len(fit_files) - len(new_fit_files)
-
-    if not new_fit_files:
-        log.info("Všech %d aktivit již zpracováno – nic nového.", len(fit_files))
-        return
-
-    log.info("Nalezeno %d FIT souborů celkem, %d přeskočeno, %d ke zpracování.",
-             len(fit_files), skipped, len(new_fit_files))
+    # ── Inkrementální režim ──────────────────────────────────────────────────
+    if force_parse:
+        log.info("--force-parse: přeskakuji inkrementální kontrolu, zpracuji všech %d souborů.", len(fit_files))
+        existing_ids: set[str] = set()
+    else:
+        existing_ids = _load_existing_ids(SUMMARY_CSV)
+        if existing_ids:
+            log.info("Nalezeno %d již zpracovaných aktivit v %s.", len(existing_ids), SUMMARY_CSV)
 
     summary_rows: list[dict] = []
-    processed = failed = 0
+    processed = failed = skipped = 0
 
-    # ── Streaming zápis – append režim s podmíněným headerem ────────────────
-    write_highres_header = _csv_needs_header(HIGHRES_CSV)
-    write_summary_header = _csv_needs_header(SUMMARY_CSV)
+    # ── Streaming zápis ──────────────────────────────────────────────────────
+    open_mode = "w" if force_parse else "a"
+    write_highres_header = force_parse or _csv_needs_header(HIGHRES_CSV)
+    write_summary_header = force_parse or _csv_needs_header(SUMMARY_CSV)
 
     with (
-        open(HIGHRES_CSV, "a", newline="", encoding="utf-8") as fh,
-        open(SUMMARY_CSV, "a", newline="", encoding="utf-8") as sf,
+        open(HIGHRES_CSV, open_mode, newline="", encoding="utf-8") as fh,
+        open(SUMMARY_CSV, open_mode, newline="", encoding="utf-8") as sf,
     ):
         hr_writer = csv.DictWriter(fh, fieldnames=HIGHRES_COLS)
         sm_writer = csv.DictWriter(sf, fieldnames=SUMMARY_COLS)
@@ -838,8 +830,14 @@ def main() -> None:
         if write_summary_header:
             sm_writer.writeheader()
 
-        for i, fit_path in enumerate(new_fit_files, 1):
-            log.info("─── [%d/%d] %s", i, len(new_fit_files), os.path.basename(fit_path))
+        for i, fit_path in enumerate(fit_files, 1):
+            fname = os.path.basename(fit_path)
+            if not force_parse and extract_activity_id(fit_path) in existing_ids:
+                log.info("[INFO] Soubor %s již existuje, přeskakuji parse.", fname)
+                skipped += 1
+                continue
+
+            log.info("─── [%d/%d] %s", i, len(fit_files), fname)
             result = parse_fit_file(fit_path, hr_writer)
             if result is not None:
                 sm_writer.writerow(result)
@@ -850,6 +848,10 @@ def main() -> None:
             if i % 10 == 0:
                 fh.flush()
                 sf.flush()
+
+    if processed == 0 and failed == 0:
+        log.info("Všech %d aktivit již zpracováno – nic nového.", len(fit_files))
+        return
 
     log.info("=" * 70)
     log.info("DOKONČENO  Zpracováno: %d aktivit  |  Chyb: %d  |  Přeskočeno: %d",
@@ -866,4 +868,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import argparse as _ap
+    _parser = _ap.ArgumentParser(description="FIT → CSV parser")
+    _parser.add_argument("--force-parse", action="store_true",
+                         help="Přeparsuj vše od nuly (ignoruj inkrementální kontrolu)")
+    _args = _parser.parse_args()
+    main(force_parse=_args.force_parse)

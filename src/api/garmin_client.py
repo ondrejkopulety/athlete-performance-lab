@@ -1749,7 +1749,7 @@ def main() -> set:
         # ── Smart Incremental Sync: FIT existence check (last 3 days) ────
         # Pro posledních 3 dní zkontroluj fyzickou existenci FIT souborů
         # na disku. Pokud soubor chybí, naplánuj download.
-        backfill_days = 3  # vždy pokryjeme celý týden
+        backfill_days = 2  # pokryjeme včerejšek i dnešek
         force_redownload_ids: list = []
         activities_csv = CSV_FILES["activities"]
         if activities_csv.exists():
@@ -1820,10 +1820,10 @@ def main() -> set:
         ("SPÁNEK", sync_sleep),
         ("DAILY HEALTH", sync_daily_health),
         ("TRAINING READINESS", sync_training_readiness),
-        ("TRAINING STATUS", sync_training_status),
-        ("TRAINING STATUS HISTORY", sync_training_status_history),
-        ("LOAD FOCUS", sync_load_focus),
-        ("LACTATE THRESHOLD", sync_lactate_threshold),
+        # ("TRAINING STATUS", sync_training_status),          # vrací 404 / prázdná data
+        # ("TRAINING STATUS HISTORY", sync_training_status_history),  # vrací 404 / prázdná data
+        # ("LOAD FOCUS", sync_load_focus),                   # vrací 404 / prázdná data
+        # ("LACTATE THRESHOLD", sync_lactate_threshold),     # vrací 404 / prázdná data
         ("TEPOVÁ FREKVENCE", sync_heart_rate),
         ("POHYB", sync_movement),
         ("INTENZITA", sync_intensity),
