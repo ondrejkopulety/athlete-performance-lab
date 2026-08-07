@@ -92,6 +92,48 @@ strain (0–21), Seilerova polarizace 80/20 s penalizací za Z3 „junk miles".
 spánek 30 %), dual-era Bio-Readiness, sleep performance (Whoop-style),
 7denní HRV CV, celodenní Garmin stres, multi-indikátorový illness warning.
 
+**Regenerační čas** — `recovery_time_h` je Garminova (Firstbeat) vlastní
+hodnota z hodinek, ne náš odhad. Vedle ní se importuje i Garminovo
+`garmin_readiness_score`. Obojí existuje **až od 8. 8. 2025**; pro
+starších 2784 dní zůstává NULL a platí tam ATL, TSB a strain.
+
+Dopočítávat starou éru modelem by z odhadu udělalo něco, co v exportu
+vypadá stejně jako měření — proto raději NULL. Glosář to říká i chatbotovi,
+aby na dotaz o roce 2022 číslo nevymýšlel.
+
+Nahradilo to zrušenou `recovery_tax_hours = min(96, 0,08 × TRIMP^1,2)`.
+Ta byla vymyšlená a proti Garminovi obstála takhle:
+
+| | |
+|---|---|
+| Spearman s `total_trimp` | **0,995** — jen přeznačkovaný TRIMP |
+| RMSE proti Garminu | **32,0 h** |
+| RMSE nejlepší možné konstanty | 32,1 h — *k nerozeznání* |
+| RMSE přeškálovaného `atl` | **26,4 h** — jasně lepší, a už ho máme |
+
+Zajímavé je **jak** selhávala: ne přeháněním, jak by se čekalo od stropu
+96 h. Dnů, kdy tvrdila ≥ 48 h a Garmin < 24 h, bylo **nula**. Zato ve
+**40 dnech** tvrdila < 6 h, zatímco Garmin hlásil ≥ 48 h. Byl to totiž
+**tok** (co přidal dnešek, ve dnech volna nula), zatímco regenerace je
+**zásoba**, která dobíhá i když neseš nohy z postele. Medián 1,1 h proti
+Garminovým 26,6 h. Rozdíl přes 24 h mělo 36 % dní.
+
+Garminovo readiness se s naším shoduje jen zčásti — a to je informace,
+ne chyba (365 společných dní, Pearson):
+
+| proti `garmin_readiness_score` | |
+|---|---|
+| naše `readiness_score` | +0,47 |
+| `atl` | −0,47 |
+| `tsb` | +0,34 |
+| `pure_recovery_score` | **+0,28** |
+
+Nejnižší shoda je s `pure_recovery_score`, což dává smysl: ten stojí jen
+na naměřené biometrii (HRV, RHR, spánek) a o trénink se vůbec neopírá,
+kdežto Garmin do svého skóre zátěž započítává. Že se rozcházejí, je tedy
+očekávané. **Zatím neověřené** je, které z nich lépe předpovídá skutečný
+výkon — na to by bylo potřeba srovnat je s výsledky tréninků.
+
 **Per-activity fyziologie** — cardiac drift (Pa:HR decoupling), maximální
 pokles tepu za 60 s, durabilita, VAM, dechová frekvence z RSA, EPOC,
 Critical HR a TATI, fueling model, odhad ztráty tekutin.
@@ -220,6 +262,7 @@ Biometrické sloupce naopak zůstávají `NULL`, dokud data z hodinek nedorazí.
 | `test_rhr_flag.py` | Vlajka klidového tepu relativně k baseline |
 | `test_lthr.py` | Odhad prahu z terénních dat vůči laktátovému testu |
 | `test_records_merge.py` | Slučování fragmentů vteřinových dat |
+| `test_recovery_time.py` | Garmin recovery time: převod jednotek a hlavně to, že se předgarminská éra **nedopočítává** |
 
 Testy vyžadující databázi se automaticky přeskočí, pokud neběží.
 

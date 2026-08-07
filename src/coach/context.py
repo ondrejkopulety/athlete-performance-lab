@@ -58,6 +58,7 @@ TODAY_SECTIONS: dict[str, list[str]] = {
         "avg_stress_day",
         "sleep_score_day", "sleep_duration_min",
         "sleep_need_min", "sleep_performance_pct",
+        "recovery_time_h", "garmin_readiness_score", "garmin_hrv_factor_pct",
     ],
     "risk": ["acwr", "ctl_ramp_rate", "illness_warning", "stress_flag_count"],
     "performance": ["lthr_estimate"],
@@ -67,7 +68,7 @@ TODAY_SECTIONS: dict[str, list[str]] = {
         "polarization_efficiency", "fatigue_index",
     ],
     "metabolism": [
-        "epoc_score_daily", "recovery_tax_hours_daily",
+        "epoc_score_daily",
         "fat_g_daily", "carb_g_daily", "fluid_loss_l_daily",
     ],
 }
@@ -76,6 +77,7 @@ TREND_METRICS = [
     "trimp", "ctl", "atl", "tsb", "acwr",
     "pure_recovery_score", "readiness_score",
     "hrv_last_night", "rhr_day", "rhr_baseline_90d", "lthr_estimate",
+    "recovery_time_h",
     "sleep_duration_min",
     "sleep_score_day", "avg_stress_day", "monotony",
 ]
@@ -86,7 +88,7 @@ ACTIVITY_FIELDS = [
     "time_in_z1", "time_in_z2", "time_in_z3", "time_in_z4", "time_in_z5",
     "cardiac_drift", "max_hrr_60s", "durability_pct", "vam_m_per_h",
     "aet_hr_dfa", "ant_hr_dfa", "resp_rate_rsa", "epoc_score",
-    "recovery_tax_hours", "avg_gradient_pct", "climb_category",
+    "avg_gradient_pct", "climb_category",
 ]
 
 

@@ -33,6 +33,10 @@ na disku dvakrát (Garmin i Strava) — viz `src/ingestion/dedup.py`.
 `movement.csv` · `intensity.csv` · `vo2_max.csv` ·
 `training_readiness.csv` · `heart_rate_*.csv`
 
+Z `training_readiness.csv` se berou `recovery_time`, `score` a
+`hrv_factor_percent`. Jeho `sleep_score` se **ignoruje** — už chodí ze
+`sleep.csv` a dvě mapování na týž cíl by se přetloukla.
+
 **Výstupy z databáze** — generuje `python scripts/main.py export`:
 
 | soubor | obsah |

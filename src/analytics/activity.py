@@ -632,19 +632,19 @@ def compute_vam(df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_epoc(df: pd.DataFrame) -> pd.DataFrame:
     """
-    EPOC proxy a regenerační daň.
+    EPOC proxy: minuty nad prahem vážené intenzitou (Z4 ×2, Z5 ×5).
 
-    recovery_tax_hours = min(96, 0.08 × TRIMP^1.2)
-      TRIMP  50 → ~8.7 h,  100 → ~20 h,  200 → ~46 h,  350+ → strop 96 h
+    Dřív tu byla i `recovery_tax_hours = min(96, 0.08 × TRIMP^1.2)`.
+    Zrušeno: Spearman s total_trimp byl 0.9955, takže nenesla žádnou
+    informaci navíc, a proti Garminovu naměřenému recovery time dávala
+    RMSE 32.0 h – k nerozeznání od nejlepší možné konstanty (32.1 h),
+    zatímco přeškálované atl dá 26.4 h. Kolik hodin do regenerace zbývá
+    dnes říká `recovery_time_h` z daily_biometrics – měřeno hodinkami.
     """
     df = df.copy()
     z4 = pd.to_numeric(df.get("time_in_z4"), errors="coerce").fillna(0)
     z5 = pd.to_numeric(df.get("time_in_z5"), errors="coerce").fillna(0)
     df["epoc_score"] = (z4 * 2 + z5 * 5).round(1)
-
-    trimp = pd.to_numeric(df.get("total_trimp"), errors="coerce")
-    recovery = (0.08 * trimp.pow(1.2)).clip(upper=96.0).round(1)
-    df["recovery_tax_hours"] = recovery.where(trimp.notna(), 0.0)
     return df
 
 

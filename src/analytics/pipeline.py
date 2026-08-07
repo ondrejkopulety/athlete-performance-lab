@@ -52,7 +52,7 @@ ACTIVITY_METRIC_COLUMNS = [
     "cardiac_drift", "max_hrr_60s", "durability_pct", "vam_m_per_h",
     "avg_gradient_pct", "climb_category", "aet_hr_dfa", "ant_hr_dfa",
     "aet_hr_proxy", "dfa_quality", "resp_rate_rsa", "epoc_score",
-    "recovery_tax_hours", "time_at_threshold_min", "tte_z4z5_min",
+    "time_at_threshold_min", "tte_z4z5_min",
     "critical_hr", "tati_score", "fat_kcal", "carb_kcal", "fat_g",
     "carb_g", "fluid_loss_l", "heat_flag",
 ]
@@ -75,7 +75,8 @@ DAILY_METRIC_COLUMNS = [
     "sleep_score_day", "sleep_duration_min", "sleep_need_min",
     "sleep_performance_pct", "max_hrr_60s_avg",
     "stress_flag_count", "illness_warning", "stress_flags", "coach_advice",
-    "epoc_score_daily", "recovery_tax_hours_daily",
+    "epoc_score_daily",
+    "recovery_time_h", "garmin_readiness_score", "garmin_hrv_factor_pct",
     "fat_kcal_daily", "carb_kcal_daily", "fat_g_daily", "carb_g_daily",
     "fluid_loss_l_daily",
 ]
@@ -100,7 +101,8 @@ ROUND_MAP = {
     "fat_kcal_daily": 0, "carb_kcal_daily": 0,
     "fat_g_daily": 0, "carb_g_daily": 0,
     "fluid_loss_l_daily": 2,
-    "epoc_score_daily": 1, "recovery_tax_hours_daily": 1,
+    "epoc_score_daily": 1,
+    "recovery_time_h": 1, "garmin_readiness_score": 0, "garmin_hrv_factor_pct": 0,
 }
 
 

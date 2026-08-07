@@ -103,7 +103,6 @@ METRIC_COL_MAP = {
     "dfa_quality": "dfa_quality",
     "resp_rate_rsa": "resp_rate_rsa",
     "epoc_score": "epoc_score",
-    "recovery_tax_hours": "recovery_tax_hours",
     "time_at_threshold_min": "time_at_threshold_min",
     "tte_z4z5_min": "tte_z4z5_min",
     "critical_hr": "critical_hr",

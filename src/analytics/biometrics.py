@@ -37,7 +37,7 @@ W_HRV, W_RHR, W_SLEEP = 0.40, 0.30, 0.30
 W_R_HRV, W_R_SLEEP, W_R_TSB = 0.30, 0.30, 0.40
 
 # Základní potřeba spánku (7.5 h) + 0.5 min za každý TRIMP včerejška.
-# Regenerační daň (recovery_tax_hours) do vzorce záměrně nevstupuje:
+# Regenerační čas do vzorce záměrně nevstupuje – ani ten Garminův:
 # 10 h snížené kapacity neznamená 10 h spánku navíc.
 SLEEP_BASE_MIN = 450
 SLEEP_TRIMP_FACTOR = 0.5
@@ -119,6 +119,12 @@ def compute_recovery(daily: pd.DataFrame, biometrics: pd.DataFrame) -> pd.DataFr
     daily["sleep_duration_min"] = sleep_dur
     daily["avg_stress_day"] = stress
     daily["rhr_baseline_90d"] = rhr_baseline_series(biometrics, idx).round(1)
+
+    # Garminovy vlastní odhady jen protéct, nic z nich nepočítáme. Před
+    # 8/2025 zůstávají NULL – hodinky tehdy ještě nebyly, a dopočítat je
+    # modelem by z měřené hodnoty udělalo odhad, který tak nevypadá.
+    for col in ("recovery_time_h", "garmin_readiness_score", "garmin_hrv_factor_pct"):
+        daily[col] = _series_from(biometrics, col, idx)
     if biometrics is not None and not biometrics.empty and "source" in biometrics.columns:
         src = biometrics[["date", "source"]].copy()
         src["date"] = pd.to_datetime(src["date"])

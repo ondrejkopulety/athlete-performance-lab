@@ -156,7 +156,6 @@ class ActivityMetrics(Base):
 
     # R/Q/W – EPOC, práh, TATI
     epoc_score: Mapped[float | None] = mapped_column(Float)
-    recovery_tax_hours: Mapped[float | None] = mapped_column(Float)
     time_at_threshold_min: Mapped[float | None] = mapped_column(Float)
     tte_z4z5_min: Mapped[float | None] = mapped_column(Float)
     critical_hr: Mapped[float | None] = mapped_column(Float)
@@ -238,6 +237,12 @@ class DailyBiometrics(Base):
     steps: Mapped[int | None] = mapped_column(BigInteger)
     intensity_minutes: Mapped[float | None] = mapped_column(Float)
 
+    # Training Readiness – Garminovy vlastní odhady (Firstbeat).
+    # Apple je neposkytuje, takže u source='apple' zůstávají NULL.
+    recovery_time_h: Mapped[float | None] = mapped_column(Float)
+    garmin_readiness_score: Mapped[float | None] = mapped_column(Float)
+    garmin_hrv_factor_pct: Mapped[float | None] = mapped_column(Float)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -298,6 +303,12 @@ class DailyMetrics(Base):
     sleep_performance_pct: Mapped[float | None] = mapped_column(Float)
     max_hrr_60s_avg: Mapped[float | None] = mapped_column(Float)
 
+    # Garminovy vlastní odhady (Firstbeat) – měřené, ne dopočítané.
+    # Dostupné až od 8/2025, pro starší dny zůstávají NULL.
+    recovery_time_h: Mapped[float | None] = mapped_column(Float)
+    garmin_readiness_score: Mapped[float | None] = mapped_column(Float)
+    garmin_hrv_factor_pct: Mapped[float | None] = mapped_column(Float)
+
     # Varování
     stress_flag_count: Mapped[int | None] = mapped_column(Integer)
     illness_warning: Mapped[bool | None] = mapped_column(Boolean)
@@ -306,7 +317,6 @@ class DailyMetrics(Base):
 
     # Denní součty z per-activity metrik
     epoc_score_daily: Mapped[float | None] = mapped_column(Float)
-    recovery_tax_hours_daily: Mapped[float | None] = mapped_column(Float)
     fat_kcal_daily: Mapped[float | None] = mapped_column(Float)
     carb_kcal_daily: Mapped[float | None] = mapped_column(Float)
     fat_g_daily: Mapped[float | None] = mapped_column(Float)

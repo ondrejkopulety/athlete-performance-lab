@@ -191,8 +191,13 @@ def test_biometrics_were_only_added(frames):
 
 def test_rest_days_have_zero_not_null(frames):
     """Dny volna: NULL → 0. Netrénoval jsem, zátěž je nula, ne neznámo."""
+    # Vědomá odchylka: recovery_tax_hours_daily se tu už netestuje. Metrika
+    # byla zrušena jako vymyšlená (Spearman s TRIMP 0.9955, tedy žádná
+    # informace navíc; proti Garminovu měření RMSE 32.0 h, což je
+    # k nerozeznání od nejlepší možné konstanty 32.1 h).
+    # V baseline CSV sloupec zůstává, v databázi pro něj místo není.
     csv, db, common = frames
-    for column in ("epoc_score_daily", "recovery_tax_hours_daily"):
+    for column in ("epoc_score_daily",):
         a = pd.to_numeric(csv.loc[common, column], errors="coerce")
         b = pd.to_numeric(db.loc[common, column], errors="coerce")
         only_db = a.isna() & b.notna()

@@ -57,12 +57,14 @@ class DailyMetricsOut(BaseModel):
     sleep_need_min: float | None = None
     sleep_performance_pct: float | None = None
     max_hrr_60s_avg: float | None = None
+    recovery_time_h: float | None = None
+    garmin_readiness_score: float | None = None
+    garmin_hrv_factor_pct: float | None = None
     stress_flag_count: int | None = None
     illness_warning: bool | None = None
     stress_flags: str | None = None
     coach_advice: str | None = None
     epoc_score_daily: float | None = None
-    recovery_tax_hours_daily: float | None = None
     fat_kcal_daily: float | None = None
     carb_kcal_daily: float | None = None
     fat_g_daily: float | None = None
@@ -119,7 +121,6 @@ class ActivityDetailOut(ActivityOut):
     dfa_quality: str | None = None
     resp_rate_rsa: float | None = None
     epoc_score: float | None = None
-    recovery_tax_hours: float | None = None
     time_at_threshold_min: float | None = None
     critical_hr: float | None = None
     tati_score: float | None = None

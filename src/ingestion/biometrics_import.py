@@ -9,7 +9,7 @@ proti živému API – přepisovat ji naslepo by bylo riskantní (HTTP 429
 znamená hodinový ban).
 
 Tenhle modul je tedy seam mezi CSV a databází: po každém syncu přetaví
-šest denních CSV do jedné tabulky daily_biometrics. Stejnou funkci volá
+sedm denních CSV do jedné tabulky daily_biometrics. Stejnou funkci volá
 i jednorázová migrace historických dat, takže existuje jen jedna cesta,
 kterou biometrie do DB vstupuje.
 
@@ -51,6 +51,14 @@ SOURCES: dict[str, dict[str, str]] = {
     "vo2_max.csv": {"vo2_max": "vo2_max"},
     "movement.csv": {"steps": "steps"},
     "intensity.csv": {"total_intensity_min": "intensity_minutes"},
+    # Garminovy vlastní odhady (Firstbeat). sleep_score se odtud záměrně
+    # nebere – už chodí ze sleep.csv a druhé mapování na týž cíl by se
+    # v merge(how="outer") přetlouklo.
+    "training_readiness.csv": {
+        "recovery_time": "_recovery_time_min",
+        "score": "garmin_readiness_score",
+        "hrv_factor_percent": "garmin_hrv_factor_pct",
+    },
 }
 
 PCT_TO_MINUTES = {
@@ -100,6 +108,14 @@ def build_biometrics_frame(since: pd.Timestamp | None = None) -> pd.DataFrame:
                 duration * pd.to_numeric(merged[pct_col], errors="coerce") / 100.0
             ).round(1)
     merged = merged.drop(columns=[c for c in PCT_TO_MINUTES if c in merged.columns])
+
+    # Garmin reportuje recovery time v minutách, DB drží hodiny – v hodinách
+    # se to lépe čte i lépe odpovídá chatbotovi ("ještě 18 h", ne "1080 min").
+    if "_recovery_time_min" in merged.columns:
+        merged["recovery_time_h"] = (
+            pd.to_numeric(merged["_recovery_time_min"], errors="coerce") / 60.0
+        ).round(1)
+        merged = merged.drop(columns=["_recovery_time_min"])
 
     for col in [c for c in merged.columns if c != "date"]:
         merged[col] = pd.to_numeric(merged[col], errors="coerce")

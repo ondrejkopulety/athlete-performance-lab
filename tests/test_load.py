@@ -86,7 +86,6 @@ def test_hiking_trimp_is_reduced():
         "sport": ["hiking", "cycling"],
         "total_trimp": [100.0, 100.0],
         "epoc_score": [0.0, 0.0],
-        "recovery_tax_hours": [0.0, 0.0],
     })
     out = build_daily_load(activities, cal)
     assert out["trimp"].iloc[0] == pytest.approx(100.0 * HIKING_TRIMP_COEFFICIENT + 100.0)
@@ -100,7 +99,6 @@ def test_rest_days_are_zero_not_missing():
         "sport": ["cycling"],
         "total_trimp": [80.0],
         "epoc_score": [10.0],
-        "recovery_tax_hours": [5.0],
     })
     out = build_daily_load(activities, cal)
     assert len(out) == 5

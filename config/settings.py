@@ -249,7 +249,8 @@ ACTIVITY_METRICS_VERSION: int = 2
 
 # Bump when a daily formula changes → vynutí full rebuild daily_metrics.
 #   2 = 90denní baseline klidového tepu, lthr_estimate
-DAILY_METRICS_VERSION: int = 2
+#   3 = zrušena recovery_tax_hours_daily, přibyl Garmin Training Readiness
+DAILY_METRICS_VERSION: int = 3
 
 # ============================================================
 # PRAHOVÝ TEP Z TERÉNNÍCH DAT (LTHR)
@@ -502,9 +503,22 @@ METRIC_META: dict[str, dict] = {
         "unit": "body", "direction": "neutral",
         "note": "Proxy kyslíkového dluhu = minuty v Z4 × 2 + minuty v Z5 × 5.",
     },
-    "recovery_tax_hours": {
+    "recovery_time_h": {
         "unit": "h", "direction": "lower_is_better",
-        "note": "Odhad hodin snížené kapacity = min(96, 0.08 × TRIMP^1.2).",
+        "note": "Kolik hodin do plné regenerace podle Garminu (Firstbeat). "
+                "MĚŘENO hodinkami, není to náš odhad. Dostupné až od 8/2025 – "
+                "pro starší dny je NULL a tam se řiď ctl/atl/tsb, nedopočítávej.",
+    },
+    "garmin_readiness_score": {
+        "unit": "0-100", "direction": "higher_is_better",
+        "note": "Garminovo vlastní Training Readiness. Počítá se nezávisle na "
+                "našem readiness_score a pure_recovery_score – když se rozejdou, "
+                "je to informace o rozdílu modelů, ne chyba dat. Až od 8/2025.",
+    },
+    "garmin_hrv_factor_pct": {
+        "unit": "%", "direction": "higher_is_better",
+        "note": "Jak moc HRV přispívá ke Garminovu readiness skóre. Diagnostika "
+                "pro případ, kdy se naše a Garminovo skóre rozcházejí. Až od 8/2025.",
     },
     "tati_score": {
         "unit": "bpm·min", "direction": "neutral",

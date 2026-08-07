@@ -60,7 +60,7 @@ def build_daily_load(
     Denní agregace tréninkové zátěže na zadanou osu.
 
     Vrací DataFrame indexovaný datem se sloupci trimp, trimp_epoc,
-    epoc_score_daily, recovery_tax_hours_daily.
+    epoc_score_daily.
 
     Dny bez tréninku mají trimp = 0 (to je fyziologicky správně – netrénoval
     jsem, zátěž je nula). Biometrické sloupce se tu záměrně needitují,
@@ -69,7 +69,7 @@ def build_daily_load(
     empty = pd.DataFrame(
         0.0,
         index=calendar,
-        columns=["trimp", "trimp_epoc", "epoc_score_daily", "recovery_tax_hours_daily"],
+        columns=["trimp", "trimp_epoc", "epoc_score_daily"],
     )
     empty.index.name = "date"
     if activities is None or activities.empty:
@@ -78,7 +78,7 @@ def build_daily_load(
     df = activities.copy()
     df["date"] = pd.to_datetime(df["date"])
 
-    for col in ("total_trimp", "epoc_score", "recovery_tax_hours"):
+    for col in ("total_trimp", "epoc_score"):
         df[col] = pd.to_numeric(df.get(col), errors="coerce").fillna(0.0)
 
     # Přednost má TRIMP přepočítaný z klidového tepu platného k datu
@@ -96,12 +96,11 @@ def build_daily_load(
     daily = df.groupby("date").agg(
         trimp=("total_trimp", "sum"),
         epoc_score_daily=("epoc_score", "sum"),
-        recovery_tax_hours_daily=("recovery_tax_hours", "sum"),
     )
     daily = daily.reindex(calendar, fill_value=0.0)
     daily.index.name = "date"
     daily["trimp_epoc"] = daily["trimp"] + daily["epoc_score_daily"] * EPOC_WEIGHT
-    return daily[["trimp", "trimp_epoc", "epoc_score_daily", "recovery_tax_hours_daily"]]
+    return daily[["trimp", "trimp_epoc", "epoc_score_daily"]]
 
 
 def compute_ctl_atl_tsb(daily: pd.DataFrame) -> pd.DataFrame:
