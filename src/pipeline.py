@@ -8,6 +8,7 @@ Jediná definice toho, co znamená „aktualizuj data":
     2. IMPORT  – biometrii z CSV do daily_biometrics
     3. LOAD    – nové/změněné FIT soubory do activities + records
     4. ANALYZE – per-activity metriky (inkrementálně) + denní metriky
+    5. EXPORT  – CSV z databáze, aby nezastarávaly pod rukama
 
 Volá to CLI (scripts/main.py) i API (POST /api/sync/run), takže neexistují
 dvě mírně odlišné verze pipeline, které se časem rozejdou.
@@ -22,6 +23,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from src.analytics.exports import export_all
 from src.analytics.pipeline import run_analytics
 from src.db.session import session_scope
 from src.ingestion.biometrics_import import import_biometrics
@@ -93,6 +95,9 @@ def run_full_pipeline(
             "calendar_end": str(analytics.calendar_end),
             "warnings": analytics.warnings[:20],
         }
+
+        log.info("── EXPORT ── CSV z databáze")
+        report["export"] = export_all(session)
 
     report["duration_s"] = round((datetime.now() - t0).total_seconds(), 1)
     log.info("Pipeline hotová za %.1f s", report["duration_s"])

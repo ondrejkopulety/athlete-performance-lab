@@ -1,0 +1,22 @@
+[tool.pytest.ini_options]
+# Bez tohohle by pytest prohledával celý strom a mohl by si splést
+# scripts/dev/api_probe.py nebo podobný soubor s testem.
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # délku řádku hlídá formátovač, ne linter
+    "E712",  # `== True` je u pandas masek čitelnější než `is True`
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Moduly si musí přidat kořen projektu na sys.path dřív, než importují config
+"src/**" = ["E402"]
+"scripts/**" = ["E402"]
+"alembic/**" = ["E402"]

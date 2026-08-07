@@ -7,6 +7,7 @@ main.py – Garmin Training Analytics · CLI
     python scripts/main.py sync               # jen stažení z Garmin Connect
     python scripts/main.py load               # jen FIT soubory → databáze
     python scripts/main.py analyze            # jen přepočet metrik
+    python scripts/main.py export             # CSV exporty z databáze
     python scripts/main.py status             # co je v databázi
 
     python scripts/main.py analyze --force-metrics   # přepočítat i aktuální metriky
@@ -93,7 +94,7 @@ def main() -> None:
     # "invalid choice: ['all']".
     parser.add_argument(
         "steps", nargs="*",
-        choices=["sync", "load", "analyze", "status", "all"],
+        choices=["sync", "load", "analyze", "export", "status", "all"],
         help="Které kroky spustit (výchozí: all)",
     )
     parser.add_argument("--skip-download", action="store_true",
@@ -144,6 +145,12 @@ def main() -> None:
             with session_scope() as session:
                 result = run_analytics(session, force_activities=args.force_metrics)
                 report["analytics"] = result.summary()
+
+        if "export" in steps:
+            from src.analytics.exports import export_all
+
+            with session_scope() as session:
+                report["export"] = export_all(session)
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))

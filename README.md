@@ -21,7 +21,7 @@ docker compose up -d db
 .venv/bin/alembic upgrade head
 
 # 4. Jednorázový import historických CSV (pokud je máš)
-.venv/bin/python scripts/migrate_csv_to_db.py
+.venv/bin/python scripts/setup/migrate_csv_to_db.py
 
 # 5. Běh pipeline
 .venv/bin/python scripts/main.py
@@ -35,7 +35,7 @@ docker compose up -d db
 ## Pipeline
 
 ```
-SYNC ──▶ IMPORT ──▶ LOAD ──▶ ANALYZE
+SYNC ──▶ IMPORT ──▶ LOAD ──▶ ANALYZE ──▶ EXPORT
 ```
 
 | Krok | Co dělá |
@@ -44,10 +44,12 @@ SYNC ──▶ IMPORT ──▶ LOAD ──▶ ANALYZE
 | **IMPORT** | Přetaví denní CSV (HRV, spánek, RHR, stres) do `daily_biometrics` |
 | **LOAD** | Deduplikuje Garmin vs. Strava FIT soubory a zapíše je do `activities` + `records` |
 | **ANALYZE** | Per-activity metriky (inkrementálně) + denní metriky (PMC, regenerace, kvalita) |
+| **EXPORT** | CSV z databáze, aby nezastarávaly pod rukama |
 
 ```bash
 python scripts/main.py                  # celá pipeline
 python scripts/main.py analyze          # jen přepočet metrik
+python scripts/main.py export           # CSV exporty z databáze
 python scripts/main.py load --force     # přeparsovat všechny FIT soubory
 python scripts/main.py --skip-download  # bez sítě, jen nad lokálními daty
 python scripts/main.py status           # co je v databázi
@@ -75,7 +77,10 @@ pipeline sama přepočítá vše dotčené.
 ## Metriky
 
 **Tréninková zátěž (PMC)** — denní TRIMP (Banister), CTL (42 d), ATL (7 d),
-TSB s jednodenním posunem (ranní forma *před* dnešním tréninkem).
+TSB s jednodenním posunem (ranní forma *před* dnešním tréninkem). TRIMP se
+počítá z klidového tepu **platného k datu aktivity** (90denní klouzavý
+medián), ne z pevné konstanty — stejný tep při RHR 44 a 52 znamená jinou
+relativní zátěž.
 
 **Prevence zranění** — ACWR (7 d / 28 d z EPOC-vážené TRIMP, bez clipování),
 CTL ramp rate.
@@ -88,9 +93,19 @@ spánek 30 %), dual-era Bio-Readiness, sleep performance (Whoop-style),
 7denní HRV CV, celodenní Garmin stres, multi-indikátorový illness warning.
 
 **Per-activity fyziologie** — cardiac drift (Pa:HR decoupling), maximální
-pokles tepu za 60 s, durabilita, VAM, DFA-alpha1 (aerobní i anaerobní práh
-z R-R intervalů přes neurokit2), dechová frekvence z RSA, EPOC, Critical HR
-a TATI, fueling model, odhad ztráty tekutin.
+pokles tepu za 60 s, durabilita, VAM, dechová frekvence z RSA, EPOC,
+Critical HR a TATI, fueling model, odhad ztráty tekutin.
+
+**Prahový tep** — `lthr_estimate` = 0,95 × nejlepší 20minutový průměr tepu
+za 180 dní. Na těchto datech dává 172 bpm, shodně s laktátovým testem.
+Je to **reference, ne zdroj zón** — zóny v `settings.py` jsou naměřené
+a mají přednost. Zároveň je to dolní mez: po období bez intenzity klesne,
+aniž by se práh zhoršil.
+
+DFA-alpha1 je v kódu, ale na těchto datech nedává použitelné prahy —
+alpha1 zůstává nad 1,2 i při tepu nad prahem a R-R intervaly má jen 73
+z 866 aktivit (Strava je v exportech zahazuje, Garmin je v provozu až
+od 8/2025). Běží s diagnostikou, aby bylo z dat vidět, kdy se to změní.
 
 Význam, jednotky a směr každé metriky jsou strojově čitelné v
 `config/settings.py` → `METRIC_META` a servírují se na `/api/coach/glossary`.
@@ -163,11 +178,12 @@ změna vzorce se projeví bumpnutím verze, aniž by se sáhlo na vstupy.
 Tatáž aktivita bývá na disku dvakrát — jednou z hodinek, jednou ze Stravy.
 `src/ingestion/dedup.py` v okně ±30 minut rozhodne, který soubor je lepší:
 
-1. **Pojistka integrity** — soubor s >25 % více záznamy vyhrává (druhý je
+1. **R-R intervaly** — soubor, který je má, vyhrává. Strava je ve svých
+   exportech zahazuje úplně, takže jde o nenahraditelná data; vteřinová
+   data se dají interpolovat, R-R ne.
+2. **Pojistka integrity** — soubor s >25 % více záznamy vyhrává (druhý je
    oříznutý); Smart Recording se od poškozených dat rozlišuje HR density
-2. **Hrudní pás > optika** — ANT+ pás vyhrává bez ohledu na zdroj
-3. **Detekce pásu přes HRV zprávy** — Strava exporty nemají `device_info`,
-   ale přítomnost R-R intervalů pás spolehlivě prozradí
+3. **Hrudní pás > optika** — ANT+ pás vyhrává bez ohledu na zdroj
 4. **HR density** ≥ 90 %, jinak se přepne na druhý zdroj
 5. **Větší soubor** při naprosté shodě
 
@@ -196,10 +212,14 @@ Biometrické sloupce naopak zůstávají `NULL`, dokud data z hodinek nedorazí.
 
 | Soubor | Co hlídá |
 |---|---|
-| `test_parity.py` | Shodu s výstupem původní implementace (`athlete_readiness.csv`) |
+| `test_parity.py` | Že se neztratil den historie a že posun proti původní implementaci je v očekávaném řádu |
 | `test_calendar.py` | Kalendář končí dneškem, začíná nejstarším záznamem, nemá díry |
 | `test_metrics.py` | Fyziologické invarianty (rozsahy skóre, součet polarizace, TSB posun) |
 | `test_load.py` | Vzorce PMC — EMA konstanta, TSB posun, koeficient pro pěší sporty |
+| `test_rhr_baseline.py` | Klidový tep jako časová řada, oddělení zdrojů, vliv na TRIMP |
+| `test_rhr_flag.py` | Vlajka klidového tepu relativně k baseline |
+| `test_lthr.py` | Odhad prahu z terénních dat vůči laktátovému testu |
+| `test_records_merge.py` | Slučování fragmentů vteřinových dat |
 
 Testy vyžadující databázi se automaticky přeskočí, pokud neběží.
 
@@ -228,9 +248,15 @@ src/
   coach/context.py        Kontext pro LLM
   api/                    FastAPI (app, schemas, routers)
   pipeline.py             Celý běh na jednom místě (sdílí CLI i API)
+  analytics/exports.py    CSV exporty z databáze
 scripts/
   main.py                 CLI
-  migrate_csv_to_db.py    Jednorázový import historických CSV
+  setup/                  jednorázové: migrace CSV→DB, tokeny, preflight
+  legacy/                 skripty čtoucí CSV, které pipeline neaktualizuje
+data/
+  fit/                    zdroj pravdy – tohle zálohuj
+  _baseline/              zmrazený referenční bod pro testy
+  _archive/               osiřelé soubory (~210 MB, lze smazat)
 ```
 
 ---

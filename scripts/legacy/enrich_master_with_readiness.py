@@ -6,7 +6,7 @@ Output: data/summaries/master_enriched_summary.csv
 import pandas as pd
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parents[2]
 MASTER_PATH = BASE_DIR / "data/summaries/master_high_res_summary.csv"
 READINESS_PATH = BASE_DIR / "data/summaries/athlete_readiness.csv"
 OUTPUT_PATH = BASE_DIR / "data/summaries/master_enriched_summary.csv"

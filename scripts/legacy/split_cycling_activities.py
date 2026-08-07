@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-BASE_DIR       = Path(__file__).resolve().parent.parent
+BASE_DIR       = Path(__file__).resolve().parents[2]
 SUMMARY_CSV    = BASE_DIR / "data" / "summaries" / "master_high_res_summary.csv"
 TRAINING_CSV   = BASE_DIR / "data" / "summaries" / "master_high_res_training_data.csv"
 GEOCODE_CACHE  = BASE_DIR / "data" / "processed" / "geocode_cache.json"

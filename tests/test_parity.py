@@ -34,10 +34,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from config.settings import SUMMARIES_DIR
+from config.settings import DATA_DIR
 from src.db import repository as repo
 
-BASELINE_CSV = SUMMARIES_DIR / "athlete_readiness.csv"
+# Zmrazená kopie, ne živý export – jinak by se výstup porovnával sám se sebou
+BASELINE_DIR = DATA_DIR / "_baseline"
+BASELINE_CSV = BASELINE_DIR / "athlete_readiness.csv"
 RENAME = {"CTL": "ctl", "ATL": "atl", "TSB": "tsb", "fluid_loss_L_daily": "fluid_loss_l_daily"}
 
 # Metriky odvozené jen z času v tepových zónách. Zóny jsou pevné, takže
@@ -50,7 +52,7 @@ RHR_INDEPENDENT = ["polarization_low_pct", "polarization_high_pct"]
 MAX_SHIFT = {"ctl": 8.0, "atl": 15.0, "tsb": 12.0}
 
 
-BASELINE_ACTIVITIES_CSV = SUMMARIES_DIR / "master_high_res_summary.csv"
+BASELINE_ACTIVITIES_CSV = BASELINE_DIR / "master_high_res_summary.csv"
 
 
 def _comparable_until(session):
