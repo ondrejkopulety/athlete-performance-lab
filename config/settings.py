@@ -188,15 +188,33 @@ HR_SETTLE_WINDOW_S: int          = 3 * 60      # 3 minutes
 # Set False to skip exclusion-zone filtering for quick / offline runs
 ENABLE_EXCLUSION_ZONES: bool     = True
 
-# Locations to completely exclude from all outputs (home, work, known false-positives).
-# Format:  "Label": (latitude, longitude, radius_metres)
-# Edit coordinates to your real locations; add/remove entries freely.
-EXCLUDED_LOCATIONS: dict[str, tuple[float, float, float]] = {
-    "Ignored_Spot_1": (50.0755000, 14.4378000, 200),
-    "Ignored_Spot_2": (50.0880000, 14.4210000, 200),
-    "Ignored_Spot_3": (50.0912000, 14.4055000, 200),
-    "Ignored_Spot_4": (50.0640000, 14.4501000, 200),
-}
+# Místa vyloučená ze všech výstupů (domov, práce, známé falešné poplachy).
+#
+# Souřadnice žijí v .env, ne tady: jsou to reálné adresy s přesností na
+# metry a repozitář může být veřejný. Kód v repu, data mimo něj.
+#
+# Formát v .env (středníkem oddělené položky, popisek je volitelný):
+#   EXCLUDED_LOCATIONS=domov:50.0755,14.4378,200;prace:50.0880,14.4210,200
+def _parse_excluded_locations(raw: str) -> dict[str, tuple[float, float, float]]:
+    out: dict[str, tuple[float, float, float]] = {}
+    for i, entry in enumerate(p.strip() for p in raw.split(";")):
+        if not entry:
+            continue
+        label, _, coords = entry.rpartition(":")
+        parts = [c.strip() for c in coords.split(",")]
+        if len(parts) != 3:
+            continue  # poškozený zápis raději ignoruj, než aby spadl import
+        try:
+            lat, lon, radius = (float(parts[0]), float(parts[1]), float(parts[2]))
+        except ValueError:
+            continue
+        out[label.strip() or f"Ignored_Spot_{i + 1}"] = (lat, lon, radius)
+    return out
+
+
+EXCLUDED_LOCATIONS: dict[str, tuple[float, float, float]] = _parse_excluded_locations(
+    os.getenv("EXCLUDED_LOCATIONS", "")
+)
 
 # Sports considered "cardio" (cycling + running variants).
 # Used to filter activities before stop-detection in all three pipeline scripts.
