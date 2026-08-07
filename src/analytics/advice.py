@@ -16,9 +16,9 @@ import pandas as pd
 
 from config.settings import (
     CTL_RAMP_WARN,
-    HIGH_RHR_THRESHOLD,
     HRV_DROP_THRESHOLD,
     LOW_SLEEP_SCORE,
+    RHR_ELEVATION_BPM,
     SHORT_SLEEP_MINUTES,
 )
 
@@ -56,9 +56,14 @@ def _row_advice(row: pd.Series) -> str:
                 f"({hrv_ln:.0f} vs {hrv_wa:.0f} ms)"
             )
 
+    # Zvýšený tep se hlásí vůči vlastnímu baseline, ne proti pevnému číslu –
+    # „48 bpm" samo o sobě nic neříká, „48 při běžných 43" ano.
     rhr = row.get("rhr_day", np.nan)
-    if pd.notna(rhr) and rhr > HIGH_RHR_THRESHOLD:
-        parts.append(f"Vysoký RHR ({rhr:.0f} bpm)")
+    rhr_elev = row.get("rhr_elevation_bpm", np.nan)
+    if pd.notna(rhr) and pd.notna(rhr_elev) and rhr_elev >= RHR_ELEVATION_BPM:
+        parts.append(
+            f"Zvýšený RHR ({rhr:.0f} bpm, +{rhr_elev:.0f} nad 14denním průměrem)"
+        )
 
     if row.get("illness_warning", False):
         parts.insert(0, "⚠️ ILLNESS WARNING – zvažuj odpočinek")

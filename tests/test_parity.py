@@ -28,11 +28,19 @@ BOOL_COLUMNS = {"illness_warning", "ctl_ramp_warning"}
 TEXT_COLUMNS = {"stress_flags", "coach_advice"}
 
 # Sloupce s vědomou odchylkou – ověřují se samostatnými testy níže
+# a v tests/test_rhr_flag.py
 KNOWN_DIFFERENCES = {
     "epoc_score_daily",           # dny volna: NULL → 0
     "recovery_tax_hours_daily",   # dtto
     "max_hrr_60s_avg",            # deduplikovaná vteřinová data
-    "coach_advice",               # oprava překlepu „snič" → „sniž"
+    "coach_advice",               # oprava překlepu + relativní hlášení RHR
+    # Vlajka pro klidový tep se změnila z pevného prahu 46 bpm na elevaci
+    # nad vlastním 14denním baseline. Tyhle tři sloupce z ní vycházejí,
+    # takže se s baseline z definice neshodují – chování ověřuje
+    # tests/test_rhr_flag.py.
+    "stress_flags",
+    "stress_flag_count",
+    "illness_warning",
 }
 
 
@@ -120,7 +128,7 @@ def test_baseline_days_are_present_in_db(frames):
             "hrv_weekly_avg", "hrv_cv_pct", "rhr_day", "avg_stress_day",
             "sleep_score_day", "sleep_duration_min", "sleep_need_min",
             "sleep_performance_pct", "polarization_low_pct",
-            "polarization_high_pct", "stress_flag_count",
+            "polarization_high_pct",
             "fat_kcal_daily", "carb_kcal_daily", "fat_g_daily", "carb_g_daily",
             "fluid_loss_l_daily",
         }
@@ -138,7 +146,7 @@ def test_numeric_column_matches_baseline(frames, column):
     assert (a[both] - b[both]).abs().max() < 1e-6, f"{column}: číselná odchylka"
 
 
-@pytest.mark.parametrize("column", sorted(BOOL_COLUMNS))
+@pytest.mark.parametrize("column", sorted(BOOL_COLUMNS - KNOWN_DIFFERENCES))
 def test_boolean_column_matches_baseline(frames, column):
     csv, db, common = frames
     a = csv.loc[common, column].astype(str).str.lower().isin(["true", "1", "1.0"])
@@ -146,11 +154,19 @@ def test_boolean_column_matches_baseline(frames, column):
     assert (a == b).all()
 
 
-def test_stress_flags_match_baseline(frames):
+def test_stress_flags_differ_only_in_rhr(frames):
+    """
+    Jediná vlajka, která se změnila, je high_rhr. Ostatní tři musí proti
+    baseline sedět přesně – jinak by se do výsledku vloudila jiná změna.
+    """
     csv, db, common = frames
     a = csv.loc[common, "stress_flags"].fillna("").astype(str)
     b = db.loc[common, "stress_flags"].fillna("").astype(str)
-    assert (a == b).all()
+
+    for flag in ("hrv_drop", "bad_sleep", "high_strain"):
+        assert (a.str.contains(flag) == b.str.contains(flag)).all(), (
+            f"Vlajka {flag} se změnila, i když neměla"
+        )
 
 
 # ── Vědomé odchylky ────────────────────────────────────────────────────────
@@ -175,15 +191,10 @@ def test_rest_days_now_zero_instead_of_null(frames, column):
     assert not (a.notna() & b.isna()).any(), "Nesmíme ztratit hodnotu, kterou baseline měl"
 
 
-def test_coach_advice_differs_only_by_typo_fix(frames):
-    """Jediný rozdíl v textu doporučení je oprava překlepu „snič" → „sniž"."""
-    csv, db, common = frames
-    a = csv.loc[common, "coach_advice"].fillna("").astype(str)
-    b = db.loc[common, "coach_advice"].fillna("").astype(str)
-
-    differing = a[a != b]
-    assert not differing.empty, "Očekáváme právě opravu překlepu"
-    assert (a.str.replace("snič intenzitu", "sniž intenzitu", regex=False) == b).all()
+# coach_advice se proti baseline neporovnává. Je to jen textová prezentace
+# metrik, které jsou testované jednotlivě, a diff volného textu proti
+# zastaralému souboru dává křehká tvrzení s malou hodnotou. Kontrakt
+# doporučení ověřuje tests/test_rhr_flag.py::test_coach_advice_*.
 
 
 def test_max_hrr_differences_are_bounded(frames):

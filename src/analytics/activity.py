@@ -40,8 +40,9 @@ from config.settings import (
     MAX_HR as ATHLETE_MAX_HR,
     MAX_REALISTIC_HRR,
     MIN_STARTING_HR,
-    RESTING_HR as ATHLETE_RHR,
+    RESTING_HR as ATHLETE_RHR,  # noqa: F401 – ponecháno pro dopočty mimo zóny
     WARMUP_SECONDS,
+    ZONES as ATHLETE_ZONES,
 )
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -687,11 +688,15 @@ def compute_critical_hr(df: pd.DataFrame) -> pd.DataFrame:
         chr_hr = 0.85 * ATHLETE_MAX_HR
     chr_hr = round(float(chr_hr))
 
-    hrr = ATHLETE_MAX_HR - ATHLETE_RHR
-    z4_lo = round(0.82 * hrr + ATHLETE_RHR)
-    z5_lo = round(0.90 * hrr + ATHLETE_RHR)
-    avg_z4_hr = (z4_lo + z5_lo) / 2.0
-    avg_z5_hr = (z5_lo + ATHLETE_MAX_HR) / 2.0
+    # Střed zóny se bere z nakonfigurovaných ZONES, ne z procent tepové
+    # rezervy. Minuty v time_in_z4/z5 pocházejí z laktátových zón, takže
+    # vážit je odhadem tepu odvozeným jinou definicí by míchalo dvě různé
+    # škály – a hlavně by se to tiše rozešlo, kdyby se zóny po dalším
+    # laktátovém testu upravily.
+    z4_lo, z4_hi = ATHLETE_ZONES["Z4"]
+    z5_lo, z5_hi = ATHLETE_ZONES["Z5"]
+    avg_z4_hr = (z4_lo + z4_hi) / 2.0
+    avg_z5_hr = (z5_lo + z5_hi) / 2.0
 
     z4_min = pd.to_numeric(df.get("time_in_z4"), errors="coerce").fillna(0)
     z5_min = pd.to_numeric(df.get("time_in_z5"), errors="coerce").fillna(0)

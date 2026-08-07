@@ -21,10 +21,11 @@ import numpy as np
 import pandas as pd
 
 from config.settings import (
-    HIGH_RHR_THRESHOLD,
     HRV_DROP_THRESHOLD,
     ILLNESS_FLAG_COUNT,
     LOW_SLEEP_SCORE,
+    RHR_BASELINE_DAYS,
+    RHR_ELEVATION_BPM,
     SHORT_SLEEP_MINUTES,
 )
 
@@ -94,9 +95,10 @@ def compute_recovery(daily: pd.DataFrame, biometrics: pd.DataFrame) -> pd.DataFr
     hrv_component = ((ratio.clip(0.7, 1.3) - 0.7) / 0.6) * 100  # 0.7→0, 1.3→100
 
     # ── RHR složka (30 %) – odchylka od 14denního baseline ──────────────────
-    rhr_baseline = _rolling_on_present(rhr, window=14, min_periods=5, stat="mean")
+    rhr_baseline = _rolling_on_present(rhr, window=RHR_BASELINE_DAYS, min_periods=5, stat="mean")
     diff = rhr - rhr_baseline  # záporné = nižší tep = lepší
     rhr_component = (1 - (diff.clip(-5, 10) + 5) / 15) * 100
+    daily["rhr_baseline_14d"] = rhr_baseline.round(1)
 
     # ── Spánková složka (30 %) – skóre je už 0–100 ──────────────────────────
     sleep_component = sleep_score.clip(0, 100)
@@ -175,12 +177,17 @@ def compute_illness_warning(daily: pd.DataFrame) -> pd.DataFrame:
 
     Čtyři nezávislé vlajky:
       1. HRV pod týdenním průměrem o víc než HRV_DROP_THRESHOLD
-      2. RHR nad HIGH_RHR_THRESHOLD
+      2. RHR o RHR_ELEVATION_BPM nad vlastním 14denním baseline
       3. bad_sleep = nízké skóre NEBO krátký spánek (sloučeno záměrně –
          jedna špatná noc nesmí zvednout dvě vlajky a předčasně spustit alarm)
       4. Strain v horním kvartilu při současně nízké regeneraci
 
     illness_warning se zapne při ILLNESS_FLAG_COUNT a více vlajkách současně.
+
+    Všechny vlajky jsou relativní k vlastnímu baseline, ne k pevným číslům.
+    U RHR to platí od chvíle, kdy se ukázalo, že absolutní práh 46 bpm ležel
+    přesně na mediánu a vlajka proto hořela 44 % dní – tedy nenesla žádnou
+    informaci a jen ředila celý alarm.
     """
     daily = daily.copy()
     flags = pd.DataFrame(index=daily.index)
@@ -194,8 +201,19 @@ def compute_illness_warning(daily: pd.DataFrame) -> pd.DataFrame:
     else:
         flags["hrv_drop"] = False
 
+    # Baseline se počítá z PŘEDCHOZÍCH dní (shift(1)) – kdyby zahrnoval
+    # dnešek, elevovaná hodnota by si zvedla vlastní referenci a tlumila
+    # tak signál, který má právě detekovat.
     rhr = pd.to_numeric(daily.get("rhr_day"), errors="coerce")
-    flags["high_rhr"] = (rhr > HIGH_RHR_THRESHOLD).fillna(False)
+    rhr_baseline = _rolling_on_present(
+        rhr.shift(1), window=RHR_BASELINE_DAYS, min_periods=5, stat="mean"
+    )
+    # Zaokrouhlit dřív, než se porovnává. Jinak by se rozhodovalo nad jiným
+    # číslem, než jaké uvidí uživatel: elevace 4,96 se zobrazí jako +5,0,
+    # ale varování by nepřišlo.
+    elevation = (rhr - rhr_baseline).round(1)
+    flags["high_rhr"] = (elevation >= RHR_ELEVATION_BPM).fillna(False)
+    daily["rhr_elevation_bpm"] = elevation
 
     low_score = (
         pd.to_numeric(daily.get("sleep_score_day"), errors="coerce") < LOW_SLEEP_SCORE

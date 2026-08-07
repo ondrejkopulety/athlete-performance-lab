@@ -83,7 +83,14 @@ CARDIAC_DRIFT_MAX_ALT  = 30.0  # metres – max altitude range for drift
 # READINESS / ILLNESS WARNING
 # ============================================================
 HRV_DROP_THRESHOLD     = 0.10  # 10 % below weekly avg → warning
-HIGH_RHR_THRESHOLD     = 46    # bpm above → flag
+
+# Klidový tep se posuzuje RELATIVNĚ k vlastnímu baseline, ne proti pevnému
+# číslu. Absolutní práh nefunguje: RHR se v průběhu sezóny posouvá s formou
+# i s věkem, takže hodnota nastavená jednou brzy leží uprostřed běžného
+# rozptylu a vlajka pak hoří zhruba obden, čímž ztrácí výpovědní hodnotu.
+# Elevace o 5 bpm nad baseline je běžně užívaný marker únavy či nemoci.
+RHR_BASELINE_DAYS      = 14    # okno pro klouzavý baseline klidového tepu
+RHR_ELEVATION_BPM      = 5     # o kolik bpm nad baseline → varovná vlajka
 LOW_SLEEP_SCORE        = 60    # sleep score below → flag
 SHORT_SLEEP_MINUTES    = 360   # < 6 h total → flag
 ILLNESS_FLAG_COUNT     = 3     # simultaneous flags → illness alert
@@ -353,7 +360,23 @@ METRIC_META: dict[str, dict] = {
     },
     "rhr_day": {
         "unit": "bpm", "direction": "lower_is_better",
-        "note": f"Klidový tep. Nad {HIGH_RHR_THRESHOLD} bpm se aktivuje varovná vlajka.",
+        "note": "Klidový tep z Garminu. Absolutní hodnota je individuální – "
+                "vždy porovnávej s rhr_baseline_14d, ne s populačními normami.",
+    },
+    "rhr_baseline_14d": {
+        "unit": "bpm", "direction": "neutral",
+        "note": f"Klouzavý {RHR_BASELINE_DAYS}denní průměr klidového tepu. "
+                "Referenční hodnota, vůči které se posuzuje elevace.",
+    },
+    "rhr_elevation_bpm": {
+        "unit": "bpm", "direction": "lower_is_better",
+        "note": f"O kolik je dnešní klidový tep nad vlastním "
+                f"{RHR_BASELINE_DAYS}denním baseline. Baseline se počítá "
+                "z předchozích dní, aby si zvýšená hodnota nezvedala vlastní referenci.",
+        "bands": {
+            f"< {RHR_ELEVATION_BPM}": "běžný rozptyl",
+            f">= {RHR_ELEVATION_BPM}": "elevace – únava, nemoc nebo nedostatek spánku",
+        },
     },
     "avg_stress_day": {
         "unit": "0–100", "direction": "lower_is_better",

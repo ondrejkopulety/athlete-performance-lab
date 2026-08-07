@@ -262,6 +262,8 @@ class DailyMetrics(Base):
     hrv_weekly_avg: Mapped[float | None] = mapped_column(Float)
     hrv_cv_pct: Mapped[float | None] = mapped_column(Float)
     rhr_day: Mapped[float | None] = mapped_column(Float)
+    rhr_baseline_14d: Mapped[float | None] = mapped_column(Float)
+    rhr_elevation_bpm: Mapped[float | None] = mapped_column(Float)
     avg_stress_day: Mapped[float | None] = mapped_column(Float)
     sleep_score_day: Mapped[float | None] = mapped_column(Float)
     sleep_duration_min: Mapped[float | None] = mapped_column(Float)
