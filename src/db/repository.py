@@ -381,7 +381,37 @@ def downsample_records(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def upsert_biometrics(session: Session, rows: list[dict]) -> int:
-    return upsert(session, DailyBiometrics, rows, index_elements=["date"])
+    return upsert(session, DailyBiometrics, rows, index_elements=["date", "source"])
+
+
+# Priorita zdrojů biometrie. Garmin má přednost: měří přes noc s lepší
+# detekcí spánku, zatímco Apple Watch reportuje jinou hodnotu (mediány
+# 49 vs 46 bpm). Zdroje se proto neslévají, jen se vybírá.
+SOURCE_PRIORITY = ["garmin", "apple"]
+
+
+def read_biometrics_resolved(
+    session: Session, since: date | None = None, until: date | None = None
+) -> pd.DataFrame:
+    """
+    Jedna řádka na den – z každého dne vítězí zdroj s nejvyšší prioritou,
+    který pro daný den vůbec něco naměřil.
+
+    Sloupec `source` zůstává ve výstupu, aby bylo dohledatelné, odkud
+    hodnota pochází. Analytika i chatbot tak nikdy nepracují s hodnotou
+    neznámého původu.
+    """
+    df = read_biometrics(session, since=since, until=until)
+    if df.empty:
+        return df
+
+    if "source" not in df.columns:
+        return df
+
+    order = {s: i for i, s in enumerate(SOURCE_PRIORITY)}
+    df = df.assign(_rank=df["source"].map(order).fillna(len(order)))
+    df = df.sort_values(["date", "_rank"]).drop_duplicates("date", keep="first")
+    return df.drop(columns=["_rank"]).reset_index(drop=True)
 
 
 def upsert_daily_metrics(session: Session, rows: list[dict]) -> int:

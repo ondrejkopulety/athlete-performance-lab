@@ -31,6 +31,9 @@ import pandas as pd
 
 from config.settings import (
     DFA_AET_THRESHOLD,
+    LTHR_BEST_WINDOWS_MIN,
+    TRIMP_K1,
+    TRIMP_K2,
     DFA_ANT_THRESHOLD,
     DFA_WINDOW_BEATS,
     DURABILITY_MIN_DURATION_MIN,
@@ -410,7 +413,10 @@ def dfa_alpha1_thresholds(rr_ms: list[float] | None, tdata: pd.DataFrame) -> dic
     Když R-R data chybí nebo jsou příliš zašuměná, spadne to na proxy
     z linearity HR vs rychlost (modul S).
     """
-    result = {"aet_hr_dfa": None, "ant_hr_dfa": None, "dfa_quality": "none"}
+    result = {
+        "aet_hr_dfa": None, "ant_hr_dfa": None, "dfa_quality": "none",
+        "dfa_alpha1_min": None, "dfa_alpha1_median": None, "dfa_window_count": None,
+    }
 
     def _fallback() -> dict:
         proxy = dfa_alpha1_proxy(tdata)
@@ -433,7 +439,7 @@ def dfa_alpha1_thresholds(rr_ms: list[float] | None, tdata: pd.DataFrame) -> dic
             continue
         avg_hr = 60000.0 / np.mean(window)
         try:
-            alpha1, _ = nk.fractal_dfa(window, windows=DFA_BOX_SIZES)
+            alpha1, _ = nk.fractal_dfa(window, scale=DFA_BOX_SIZES)
             if np.isfinite(alpha1) and 0.0 < alpha1 < 2.0:
                 hr_alpha_pairs.append((avg_hr, alpha1))
         except Exception:
@@ -445,6 +451,13 @@ def dfa_alpha1_thresholds(rr_ms: list[float] | None, tdata: pd.DataFrame) -> dic
     pairs = sorted(hr_alpha_pairs, key=lambda x: x[0])
     hrs = np.array([p[0] for p in pairs])
     alphas = np.array([p[1] for p in pairs])
+
+    # Diagnostika: na těchhle datech alpha1 systematicky nesestupuje k 0.5,
+    # takže prahy nevznikají. Ukládá se, aby bylo z dat vidět, kde metoda
+    # funguje a kde ne – místo hádání.
+    result["dfa_alpha1_min"] = round(float(alphas.min()), 3)
+    result["dfa_alpha1_median"] = round(float(np.median(alphas)), 3)
+    result["dfa_window_count"] = len(pairs)
     kernel = min(5, max(3, len(alphas) // 3))
     alphas_smooth = uniform_filter1d(alphas, size=kernel) if kernel >= 3 else alphas
 
@@ -731,6 +744,93 @@ def compute_activity_table(activities: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def compute_trimp_from_records(tdata: pd.DataFrame, rhr: float) -> Optional[float]:
+    """
+    Banisterův TRIMP přepočítaný z vteřinových dat pro zadaný klidový tep.
+
+        TRIMP = Σ (dt/60) × ratio × k1 × e^(k2 × ratio)
+        ratio = (HR − RHR) / (MaxHR − RHR),  jen kde is_active
+
+    Proč znovu, když ho parser počítá při načtení: parser použil pevnou
+    konstantu ze settings, ale klidový tep se v čase mění. Stejný tep při
+    RHR 44 a při RHR 52 znamená jinou relativní zátěž.
+
+    Ověřeno proti parseru se stejným RHR: 98 % aktivit sedí do ±1 %.
+    Zbytek jsou fragmentované Strava soubory, kde parser počítal nulu za
+    vteřiny, jejichž fragment s tepem měl nulový časový krok – tam je
+    přepočet ze sloučených dat správnější.
+    """
+    if tdata.empty or "heart_rate" not in tdata.columns:
+        return None
+
+    hrr = ATHLETE_MAX_HR - rhr
+    if hrr <= 0:
+        return None
+
+    df = tdata.sort_values("timestamp")
+    hr = pd.to_numeric(df["heart_rate"], errors="coerce").to_numpy(dtype=float)
+
+    # Časový krok mezi záznamy, stejně jako v parseru: strop 120 s brání
+    # tomu, aby dlouhá pauza v nahrávání nafoukla zátěž.
+    seg = df["timestamp"].diff().dt.total_seconds().to_numpy(dtype=float)
+    seg = np.clip(np.nan_to_num(seg, nan=1.0), 0.0, 120.0)
+    if len(seg):
+        seg[0] = 1.0
+
+    active = (
+        df["is_active"].fillna(False).to_numpy(dtype=bool)
+        if "is_active" in df.columns
+        else np.ones(len(df), dtype=bool)
+    )
+
+    valid = active & np.isfinite(hr) & (hr > rhr) & (seg > 0)
+    if not valid.any():
+        return 0.0
+
+    ratio = np.clip((hr[valid] - rhr) / hrr, 0.0, 1.0)
+    trimp = (seg[valid] / 60.0) * ratio * TRIMP_K1 * np.exp(TRIMP_K2 * ratio)
+    return round(float(trimp.sum()), 2)
+
+
+def compute_best_hr_windows(
+    tdata: pd.DataFrame, windows_min: list[int] | None = None
+) -> dict:
+    """
+    Nejlepší klouzavý průměr tepu pro zadaná okna – podklad pro odhad prahu.
+
+    Na rozdíl od DFA-alpha1 funguje nad každou aktivitou s tepem, ne jen
+    nad těmi s hrudním pásem, a nevyžaduje beat-to-beat data.
+    """
+    windows_min = windows_min or LTHR_BEST_WINDOWS_MIN
+    out: dict = {f"best_{m}min_hr": None for m in windows_min}
+
+    if tdata.empty or "heart_rate" not in tdata.columns:
+        return out
+
+    hr = tdata[["timestamp", "heart_rate"]].dropna(subset=["heart_rate"])
+    if len(hr) < 60:
+        return out
+
+    series = (
+        hr.set_index("timestamp")
+        .sort_index()["heart_rate"]
+        .resample("1s")
+        .mean()
+        .interpolate(method="time", limit=30)
+    )
+
+    for m in windows_min:
+        w = m * 60
+        if len(series) < w:
+            continue
+        # min_periods 90 %: krátká díra v záznamu nesmí okno zahodit,
+        # ale ani se nesmí počítat průměr z poloviny dat.
+        best = series.rolling(w, min_periods=int(w * 0.9)).mean().max()
+        if pd.notna(best):
+            out[f"best_{m}min_hr"] = round(float(best), 1)
+    return out
+
+
 def is_series_eligible(sport: str | None, duration_minutes: float | None) -> bool:
     """Vteřinová analýza má smysl jen u kardio aktivit delších než 20 min."""
     if not sport or duration_minutes is None or pd.isna(duration_minutes):
@@ -754,6 +854,10 @@ def compute_activity_series_metrics(
     sport_lower = str(sport or "").lower()
     dfa = dfa_alpha1_thresholds(rr_ms, tdata)
     return {
+        **compute_best_hr_windows(tdata),
+        "dfa_alpha1_min": dfa["dfa_alpha1_min"],
+        "dfa_alpha1_median": dfa["dfa_alpha1_median"],
+        "dfa_window_count": dfa["dfa_window_count"],
         "cardiac_drift": cardiac_drift(tdata, sport_lower),
         "max_hrr_60s": max_hrr_60s(tdata),
         "durability_pct": durability(tdata, sport_lower),

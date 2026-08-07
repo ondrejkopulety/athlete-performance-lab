@@ -54,11 +54,13 @@ TODAY_SECTIONS: dict[str, list[str]] = {
     "recovery": [
         "pure_recovery_score", "readiness_score",
         "hrv_last_night", "hrv_weekly_avg", "hrv_cv_pct",
-        "rhr_day", "avg_stress_day",
+        "rhr_day", "rhr_baseline_14d", "rhr_baseline_90d", "rhr_elevation_bpm",
+        "avg_stress_day",
         "sleep_score_day", "sleep_duration_min",
         "sleep_need_min", "sleep_performance_pct",
     ],
     "risk": ["acwr", "ctl_ramp_rate", "illness_warning", "stress_flag_count"],
+    "performance": ["lthr_estimate"],
     "quality": [
         "monotony", "strain", "whoop_strain",
         "polarization_low_pct", "polarization_high_pct", "z3_junk_pct",
@@ -73,7 +75,8 @@ TODAY_SECTIONS: dict[str, list[str]] = {
 TREND_METRICS = [
     "trimp", "ctl", "atl", "tsb", "acwr",
     "pure_recovery_score", "readiness_score",
-    "hrv_last_night", "rhr_day", "sleep_duration_min",
+    "hrv_last_night", "rhr_day", "rhr_baseline_90d", "lthr_estimate",
+    "sleep_duration_min",
     "sleep_score_day", "avg_stress_day", "monotony",
 ]
 

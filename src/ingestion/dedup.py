@@ -463,13 +463,14 @@ def _pick_winner(a: dict, b: dict) -> tuple[dict, str]:
     Rozhodne, který záznam ponechat. Vrací (winner, reason_string).
 
     Prioritní pořadí:
-      0) Pojistka Integrity – pokud jeden soubor má >25 % více záznamů,
+      0) R-R intervaly – soubor, který je má, vyhrává nad souborem bez nich.
+      1) Pojistka Integrity – pokud jeden soubor má >25 % více záznamů,
          vyhrává automaticky (druhý je zřejmě oříznutý / poškozený).
-      1) Snímač – hrudní pás > optický snímač
+      2) Snímač – hrudní pás > optický snímač
          Výjimka: pokud je jeden snímač SENSOR_UNKNOWN (časté v Strava exportech),
          přeskočí sensor-rank a rovnou rozhodne HR density.
-      2) HR density – vyšší density (≥ 90 %)
-      3) Velikost souboru
+      3) HR density – vyšší density (≥ 90 %)
+      4) Velikost souboru
 
     Každý soubor je otevřen jen jednou (get_fit_metadata) – 66 % méně I/O.
     """
@@ -485,8 +486,28 @@ def _pick_winner(a: dict, b: dict) -> tuple[dict, str]:
     b_hr      = meta_b["hr_samples"]
     a_density = meta_a["hr_density"]
     b_density = meta_b["hr_density"]
+    a_hrv     = meta_a.get("hrv_count", 0)
+    b_hrv     = meta_b.get("hrv_count", 0)
 
-    # ── Krok 0: Pojistka Integrity (records_count) ──────────────────────────
+    # ── Krok 0: R-R intervaly rozhodují jako první ──────────────────────────
+    # Musí předcházet pojistce integrity. Ta se ptá jen na počet bodů, takže
+    # Strava export s vteřinovým záznamem porazí Garmin originál nahraný
+    # Smart Recordingem – a s ním zmizí i 20 tisíc R-R intervalů, které
+    # Strava ve svých exportech vůbec nemá.
+    #
+    # Vteřinová data se dají interpolovat, R-R intervaly ne: jsou jediným
+    # vstupem pro HRV analýzu a žádný jiný soubor je neobsahuje.
+    if (a_hrv >= HRV_MIN_INTERVALS) != (b_hrv >= HRV_MIN_INTERVALS):
+        winner = a if a_hrv >= HRV_MIN_INTERVALS else b
+        loser = b if winner is a else a
+        reason = (
+            f"{winner['source'].upper()} nese R-R intervaly "
+            f"({max(a_hrv, b_hrv)} vs {min(a_hrv, b_hrv)}) "
+            f"-> Vybírám {winner['source'].upper()} [data z hrudního pásu jsou nenahraditelná]"
+        )
+        return winner, reason
+
+    # ── Krok 1: Pojistka Integrity (records_count) ──────────────────────────
     max_total = max(a_total, b_total)
     min_total = min(a_total, b_total)
 

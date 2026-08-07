@@ -106,6 +106,7 @@ def build_biometrics_frame(since: pd.Timestamp | None = None) -> pd.DataFrame:
     if "steps" in merged.columns:
         merged["steps"] = merged["steps"].round().astype("Int64")
 
+    merged["source"] = "garmin"
     merged = merged.sort_values("date")
     if since is not None:
         merged = merged[pd.to_datetime(merged["date"]) >= since]

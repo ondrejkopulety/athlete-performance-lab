@@ -25,6 +25,8 @@ from config.settings import (
     ILLNESS_FLAG_COUNT,
     LOW_SLEEP_SCORE,
     RHR_BASELINE_DAYS,
+    RHR_BASELINE_LONG_DAYS,
+    RHR_BASELINE_LONG_MIN,
     RHR_ELEVATION_BPM,
     SHORT_SLEEP_MINUTES,
 )
@@ -66,6 +68,34 @@ def _rolling_on_present(values: pd.Series, window: int, min_periods: int, stat: 
     return out.reindex(values.index)
 
 
+def rhr_baseline_series(
+    biometrics: pd.DataFrame,
+    index: pd.DatetimeIndex,
+    window: int = RHR_BASELINE_LONG_DAYS,
+    min_periods: int = RHR_BASELINE_LONG_MIN,
+) -> pd.Series:
+    """
+    Dlouhodobá úroveň klidového tepu ke každému dni – vstup pro škálování
+    TRIMP.
+
+    Medián, ne průměr: jedna špatná noc (alkohol, nemoc) by průměr utáhla,
+    zatímco pro Karvonenův poměr nás zajímá ustálená úroveň. Okno je
+    záměrně dlouhé (90 dní) – zachytí drift formy napříč sezónou, ale ne
+    denní kolísání.
+
+    Vrací sérii indexovanou kalendářem; kde není dost měření, zůstává NaN
+    a volající použije konstantu ze settings.
+    """
+    values = _series_from(biometrics, "resting_heart_rate", index)
+    present = values.dropna()
+    if present.empty:
+        return pd.Series(np.nan, index=index)
+    rolling = present.rolling(window=window, min_periods=min_periods).median()
+    # ffill: baseline platí i ve dnech bez měření – klidový tep se přes noc
+    # neztratí, jen se ho ten den nepodařilo změřit.
+    return rolling.reindex(index).ffill()
+
+
 def compute_recovery(daily: pd.DataFrame, biometrics: pd.DataFrame) -> pd.DataFrame:
     """
     Pure Recovery Score (0–100) = 40 % HRV + 30 % RHR + 30 % spánek.
@@ -88,6 +118,13 @@ def compute_recovery(daily: pd.DataFrame, biometrics: pd.DataFrame) -> pd.DataFr
     daily["sleep_score_day"] = sleep_score
     daily["sleep_duration_min"] = sleep_dur
     daily["avg_stress_day"] = stress
+    daily["rhr_baseline_90d"] = rhr_baseline_series(biometrics, idx).round(1)
+    if biometrics is not None and not biometrics.empty and "source" in biometrics.columns:
+        src = biometrics[["date", "source"]].copy()
+        src["date"] = pd.to_datetime(src["date"])
+        daily["rhr_source"] = (
+            src.drop_duplicates("date", keep="last").set_index("date")["source"].reindex(idx)
+        )
 
     # ── HRV složka (40 %) – poměr k 7dennímu baseline ───────────────────────
     hrv_baseline = _rolling_on_present(hrv_last, window=7, min_periods=3, stat="mean")

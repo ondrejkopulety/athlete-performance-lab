@@ -28,7 +28,14 @@ import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from config.settings import ACTIVITY_METRICS_VERSION, DAILY_METRICS_VERSION
+from config.settings import (
+    ACTIVITY_METRICS_VERSION,
+    DAILY_METRICS_VERSION,
+    LTHR_FACTOR,
+    LTHR_TEST_MINUTES,
+    LTHR_WINDOW_DAYS,
+    RESTING_HR,
+)
 from src.analytics import advice, biometrics, load, quality
 from src.analytics import activity as act
 from src.analytics.calendar import build_calendar
@@ -39,6 +46,9 @@ log = logging.getLogger("analytics.pipeline")
 # Sloupce activity_metrics, které pipeline zapisuje (rr_intervals_ms se
 # záměrně nepřepisuje – patří ingest vrstvě).
 ACTIVITY_METRIC_COLUMNS = [
+    "trimp_adjusted", "rhr_used",
+    "best_20min_hr", "best_30min_hr", "best_60min_hr",
+    "dfa_alpha1_min", "dfa_alpha1_median", "dfa_window_count",
     "cardiac_drift", "max_hrr_60s", "durability_pct", "vam_m_per_h",
     "avg_gradient_pct", "climb_category", "aet_hr_dfa", "ant_hr_dfa",
     "aet_hr_proxy", "dfa_quality", "resp_rate_rsa", "epoc_score",
@@ -60,7 +70,8 @@ DAILY_METRIC_COLUMNS = [
     "polarization_efficiency",
     "readiness_score", "pure_recovery_score",
     "hrv_last_night", "hrv_weekly_avg", "hrv_cv_pct",
-    "rhr_day", "rhr_baseline_14d", "rhr_elevation_bpm", "avg_stress_day",
+    "rhr_day", "rhr_baseline_14d", "rhr_baseline_90d", "rhr_elevation_bpm",
+    "rhr_source", "lthr_estimate", "avg_stress_day",
     "sleep_score_day", "sleep_duration_min", "sleep_need_min",
     "sleep_performance_pct", "max_hrr_60s_avg",
     "stress_flag_count", "illness_warning", "stress_flags", "coach_advice",
@@ -76,7 +87,8 @@ ROUND_MAP = {
     "daily_efficiency": 4, "ef_trend": 4,
     "readiness_score": 1, "max_hrr_60s_avg": 1,
     "pure_recovery_score": 1,
-    "rhr_day": 0, "rhr_baseline_14d": 1, "rhr_elevation_bpm": 1,
+    "rhr_day": 0, "rhr_baseline_14d": 1, "rhr_baseline_90d": 1,
+    "rhr_elevation_bpm": 1, "lthr_estimate": 0,
     "avg_stress_day": 0,
     "hrv_last_night": 1, "hrv_weekly_avg": 1,
     "sleep_score_day": 0, "sleep_duration_min": 0,
@@ -114,6 +126,21 @@ class AnalyticsResult:
 # KROK 1 – per-activity metriky
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _rhr_lookup(session: Session, activities: pd.DataFrame) -> pd.Series:
+    """
+    Klidový tep k datu — 90denní medián, zarovnaný na kalendář aktivit.
+
+    Kde měření chybí (např. rok 2022, kdy ještě neexistoval ani Apple
+    záznam), se použije konstanta ze settings. Ta v konfiguraci zůstává
+    právě jako tahle záloha.
+    """
+    dates = pd.to_datetime(activities["date"])
+    index = pd.date_range(dates.min(), dates.max(), freq="D")
+    biometrics_df = repo.read_biometrics_resolved(session)
+    baseline = biometrics.rhr_baseline_series(biometrics_df, index)
+    return baseline.fillna(RESTING_HR)
+
+
 def compute_activity_metrics(
     session: Session,
     force: bool = False,
@@ -132,6 +159,10 @@ def compute_activity_metrics(
         return activities
     result.activities_total = len(activities)
 
+    # Klidový tep platný k datu každé aktivity. Musí se načíst dřív než
+    # per-activity metriky, protože z něj vychází přepočet TRIMP.
+    rhr_lookup = _rhr_lookup(session, activities)
+
     stale = (
         activities["activity_id"].tolist()
         if force
@@ -139,29 +170,38 @@ def compute_activity_metrics(
     )
 
     # ── Vteřinová data: jen pro zastaralé aktivity ─────────────────────────
+    # Každá aktivita se čte právě jednou. TRIMP se přepočítává vždy (týká
+    # se i chůze a posilovny), vteřinová fyziologie jen u kardio aktivit
+    # nad 20 minut – u patnáctiminutové procházky nemá drift ani DFA smysl.
     series_rows: dict[str, dict] = {}
     if stale:
         meta = activities.set_index("activity_id")
-        eligible = [
-            aid for aid in stale
-            if aid in meta.index
-            and act.is_series_eligible(meta.at[aid, "sport"], meta.at[aid, "duration_minutes"])
-        ]
-        log.info(
-            "Per-activity metriky: %d zastaralých aktivit, z toho %d s vteřinovou analýzou.",
-            len(stale), len(eligible),
-        )
-        for i, aid in enumerate(eligible, 1):
+        log.info("Per-activity metriky: %d zastaralých aktivit.", len(stale))
+
+        for i, aid in enumerate(stale, 1):
+            if aid not in meta.index:
+                continue
             tdata = repo.read_records(session, aid)
             if tdata.empty:
                 result.warnings.append(f"{aid}: chybí vteřinová data")
                 continue
-            rr = repo.read_rr_intervals(session, aid)
-            series_rows[aid] = act.compute_activity_series_metrics(
-                tdata, meta.at[aid, "sport"], rr
-            )
-            if i % 25 == 0 or i == len(eligible):
-                log.info("  [%d/%d] vteřinová analýza", i, len(eligible))
+
+            act_date = pd.Timestamp(meta.at[aid, "date"])
+            rhr = float(rhr_lookup.get(act_date, RESTING_HR))
+            row = {
+                "trimp_adjusted": act.compute_trimp_from_records(tdata, rhr),
+                "rhr_used": round(rhr, 1),
+            }
+
+            if act.is_series_eligible(meta.at[aid, "sport"], meta.at[aid, "duration_minutes"]):
+                rr = repo.read_rr_intervals(session, aid)
+                row.update(
+                    act.compute_activity_series_metrics(tdata, meta.at[aid, "sport"], rr)
+                )
+
+            series_rows[aid] = row
+            if i % 50 == 0 or i == len(stale):
+                log.info("  [%d/%d] zpracováno", i, len(stale))
     else:
         log.info("Per-activity metriky jsou aktuální (verze %d).", ACTIVITY_METRICS_VERSION)
 
@@ -240,6 +280,35 @@ def _aggregate_daily_sums(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.D
     return daily
 
 
+def _compute_lthr(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.DataFrame:
+    """
+    Odhad prahového tepu z terénních dat.
+
+    LTHR = 0.95 × nejlepší 20minutový průměr tepu v posledních 90 dnech.
+    Na reálných datech dává 172 bpm, což na bpm sedí s laktátovým testem.
+
+    Slouží jako REFERENCE, ne jako zdroj zón: měřená hodnota má přednost
+    před odhadem. Ukazuje, kdy se práh posunul natolik, že stojí za to
+    zóny v settings přenastavit.
+    """
+    daily = daily.copy()
+    daily["lthr_estimate"] = np.nan
+
+    col = f"best_{LTHR_TEST_MINUTES}min_hr"
+    if activities is None or activities.empty or col not in activities.columns:
+        return daily
+
+    best = activities[["date", col]].dropna(subset=[col]).copy()
+    if best.empty:
+        return daily
+
+    best["date"] = pd.to_datetime(best["date"])
+    daily_best = best.groupby("date")[col].max().reindex(daily.index)
+    rolling_best = daily_best.rolling(f"{LTHR_WINDOW_DAYS}D", min_periods=1).max()
+    daily["lthr_estimate"] = (rolling_best * LTHR_FACTOR).round(0)
+    return daily
+
+
 def compute_daily_metrics(session: Session, activities: pd.DataFrame) -> pd.DataFrame:
     """
     Denní metriky nad celým kalendářem.
@@ -250,7 +319,7 @@ def compute_daily_metrics(session: Session, activities: pd.DataFrame) -> pd.Data
     if len(calendar) == 0:
         return pd.DataFrame()
 
-    biometrics_df = repo.read_biometrics(session)
+    biometrics_df = repo.read_biometrics_resolved(session)
 
     daily = load.build_daily_load(activities, calendar)
     daily = load.compute_ctl_atl_tsb(daily)
@@ -264,6 +333,7 @@ def compute_daily_metrics(session: Session, activities: pd.DataFrame) -> pd.Data
     daily = quality.compute_fatigue_index(daily)
     daily = advice.compute_coach_advice(daily)
     daily = quality.compute_polarization(daily, activities)
+    daily = _compute_lthr(daily, activities)
 
     return daily.round({k: v for k, v in ROUND_MAP.items() if k in daily.columns})
 

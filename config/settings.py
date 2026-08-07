@@ -91,6 +91,13 @@ HRV_DROP_THRESHOLD     = 0.10  # 10 % below weekly avg → warning
 # Elevace o 5 bpm nad baseline je běžně užívaný marker únavy či nemoci.
 RHR_BASELINE_DAYS      = 14    # okno pro klouzavý baseline klidového tepu
 RHR_ELEVATION_BPM      = 5     # o kolik bpm nad baseline → varovná vlajka
+
+# Dlouhé okno slouží k jinému účelu: škálování tréninkové zátěže. TRIMP
+# potřebuje vědět, jaká je aktuální ÚROVEŇ klidového tepu, ne jestli je
+# dnešek mimo. Krátké okno by do zátěže vneslo denní šum ze spánku a
+# alkoholu. Medián místo průměru – odolnější vůči jednotlivé špatné noci.
+RHR_BASELINE_LONG_DAYS = 90
+RHR_BASELINE_LONG_MIN  = 30    # minimum měření v okně, jinak fallback na RESTING_HR
 LOW_SLEEP_SCORE        = 60    # sleep score below → flag
 SHORT_SLEEP_MINUTES    = 360   # < 6 h total → flag
 ILLNESS_FLAG_COUNT     = 3     # simultaneous flags → illness alert
@@ -218,10 +225,30 @@ DATABASE_URL: str = os.getenv("DATABASE_URL") or (
 # ============================================================
 # Bump when a per-activity formula changes → vynutí přepočet activity_metrics
 # u všech aktivit (řádky s nižší verzí se považují za zastaralé).
-ACTIVITY_METRICS_VERSION: int = 1
+#   2 = TRIMP z klidového tepu platného k datu, LTHR z terénních dat,
+#       oprava parametru DFA-alpha1
+ACTIVITY_METRICS_VERSION: int = 2
 
 # Bump when a daily formula changes → vynutí full rebuild daily_metrics.
-DAILY_METRICS_VERSION: int = 1
+#   2 = 90denní baseline klidového tepu, lthr_estimate
+DAILY_METRICS_VERSION: int = 2
+
+# ============================================================
+# PRAHOVÝ TEP Z TERÉNNÍCH DAT (LTHR)
+# ============================================================
+# Praktický odhad prahu: 0.95 × nejlepší 20minutový průměr tepu.
+# Na reálných datech dává 172 bpm, což na bpm sedí s laktátovým testem.
+# Na rozdíl od DFA-alpha1 funguje nad všemi aktivitami, ne jen nad těmi
+# s hrudním pásem. Slouží jen jako REFERENCE – zóny v ZONES mají přednost,
+# protože měřená hodnota je víc než odhad.
+LTHR_TEST_MINUTES      = 20    # délka úsilí, ze kterého se práh odhaduje
+LTHR_FACTOR            = 0.95  # převod 20min výkonu na hodinový práh
+# 180 dní, ne 90: odhad je DOLNÍ mez – odráží jen nejtvrdší úsilí, které
+# v okně opravdu proběhlo. Za 90 dní se snadno stane, že žádné maximální
+# úsilí nebylo, a práh pak vypadá, že spadl (naměřeno 164 vs 172 bpm).
+# Při 180 dnech vychází 172 bpm, tedy shoda s laktátovým testem.
+LTHR_WINDOW_DAYS       = 180   # okno, ve kterém se hledá nejlepší úsilí
+LTHR_BEST_WINDOWS_MIN  = [20, 30, 60]  # která okna počítat per-activity
 
 # Kolik dní historie načíst před prvním "dirty" dnem, aby rolling okna
 # (monotony 7d, ACWR 7/28d, polarizace 14d, HRV z-score 30d, strain kvantil 30d)
@@ -367,6 +394,23 @@ METRIC_META: dict[str, dict] = {
         "unit": "bpm", "direction": "neutral",
         "note": f"Klouzavý {RHR_BASELINE_DAYS}denní průměr klidového tepu. "
                 "Referenční hodnota, vůči které se posuzuje elevace.",
+    },
+    "rhr_baseline_90d": {
+        "unit": "bpm", "direction": "lower_is_better",
+        "note": f"Klouzavý {RHR_BASELINE_LONG_DAYS}denní MEDIÁN klidového tepu. "
+                "Reprezentuje aktuální úroveň, ne denní odchylku, a vstupuje "
+                "do výpočtu TRIMP jako spodní hranice tepové rezervy.",
+    },
+    "lthr_estimate": {
+        "unit": "bpm", "direction": "higher_is_better",
+        "note": f"Odhad prahového tepu z terénních dat: {LTHR_FACTOR} × nejlepší "
+                f"{LTHR_TEST_MINUTES}minutový průměr tepu za posledních "
+                f"{LTHR_WINDOW_DAYS} dní. Je to REFERENCE, ne zdroj zón – "
+                "nastavené zóny pocházejí z laktátového testu a mají přednost. "
+                "POZOR: je to dolní mez. Odráží jen nejtvrdší úsilí, které v okně "
+                "opravdu proběhlo, takže po období bez intenzity klesne, aniž by "
+                "se práh skutečně zhoršil. Pokles interpretuj až spolu s tím, "
+                "jestli v daném období vůbec nějaké maximální úsilí bylo.",
     },
     "rhr_elevation_bpm": {
         "unit": "bpm", "direction": "lower_is_better",

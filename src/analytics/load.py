@@ -81,6 +81,13 @@ def build_daily_load(
     for col in ("total_trimp", "epoc_score", "recovery_tax_hours"):
         df[col] = pd.to_numeric(df.get(col), errors="coerce").fillna(0.0)
 
+    # Přednost má TRIMP přepočítaný z klidového tepu platného k datu
+    # aktivity; total_trimp z parseru (pevná konstanta) slouží jako záloha
+    # pro aktivity, které ještě nemají odvozené metriky.
+    if "trimp_adjusted" in df.columns:
+        adjusted = pd.to_numeric(df["trimp_adjusted"], errors="coerce")
+        df["total_trimp"] = adjusted.fillna(df["total_trimp"])
+
     sport = df["sport"].astype(str).str.lower().fillna("") if "sport" in df.columns else pd.Series("", index=df.index)
     is_hiking = sport.str.contains(HIKING_SPORT_PATTERN, na=False)
     if is_hiking.any():

@@ -138,6 +138,22 @@ class ActivityMetrics(Base):
     # opětovného otevírání FIT souboru na disku.
     rr_intervals_ms: Mapped[list[float] | None] = mapped_column(ARRAY(Float))
 
+    # TRIMP přepočítaný z klidového tepu platného k datu aktivity.
+    # activities.total_trimp zůstává tím, co spočítal parser s pevnou
+    # konstantou; tohle je verzovaná odvozená hodnota.
+    trimp_adjusted: Mapped[float | None] = mapped_column(Float)
+    rhr_used: Mapped[float | None] = mapped_column(Float)
+
+    # Nejlepší klouzavé průměry tepu – vstup pro odhad prahu (LTHR)
+    best_20min_hr: Mapped[float | None] = mapped_column(Float)
+    best_30min_hr: Mapped[float | None] = mapped_column(Float)
+    best_60min_hr: Mapped[float | None] = mapped_column(Float)
+
+    # Diagnostika DFA – ať je z dat vidět, kde metoda dává smysl
+    dfa_alpha1_min: Mapped[float | None] = mapped_column(Float)
+    dfa_alpha1_median: Mapped[float | None] = mapped_column(Float)
+    dfa_window_count: Mapped[int | None] = mapped_column(Integer)
+
     # R/Q/W – EPOC, práh, TATI
     epoc_score: Mapped[float | None] = mapped_column(Float)
     recovery_tax_hours: Mapped[float | None] = mapped_column(Float)
@@ -191,9 +207,17 @@ class Record(Base):
 # DAILY_BIOMETRICS – vstupy z Garmin Connect
 # ═══════════════════════════════════════════════════════════════════════════
 class DailyBiometrics(Base):
+    """
+    Denní biometrie. Složený klíč (date, source) záměrně – Apple Watch a
+    Garmin měří klidový tep měřitelně jinak (překryv 25 dní, korelace 0.08,
+    Apple čte o 3–6 bpm výš), takže se nesmí slévat do jedné hodnoty.
+    Obě měření zůstávají uložená a čtenář si vybírá prioritou.
+    """
+
     __tablename__ = "daily_biometrics"
 
     date: Mapped[date] = mapped_column(Date, primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), primary_key=True, default="garmin")
 
     hrv_last_night: Mapped[float | None] = mapped_column(Float)
     hrv_weekly_avg: Mapped[float | None] = mapped_column(Float)
@@ -263,6 +287,9 @@ class DailyMetrics(Base):
     hrv_cv_pct: Mapped[float | None] = mapped_column(Float)
     rhr_day: Mapped[float | None] = mapped_column(Float)
     rhr_baseline_14d: Mapped[float | None] = mapped_column(Float)
+    rhr_baseline_90d: Mapped[float | None] = mapped_column(Float)
+    rhr_source: Mapped[str | None] = mapped_column(String(16))
+    lthr_estimate: Mapped[float | None] = mapped_column(Float)
     rhr_elevation_bpm: Mapped[float | None] = mapped_column(Float)
     avg_stress_day: Mapped[float | None] = mapped_column(Float)
     sleep_score_day: Mapped[float | None] = mapped_column(Float)

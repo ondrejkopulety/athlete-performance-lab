@@ -47,7 +47,10 @@ class DailyMetricsOut(BaseModel):
     hrv_cv_pct: float | None = None
     rhr_day: float | None = None
     rhr_baseline_14d: float | None = None
+    rhr_baseline_90d: float | None = None
     rhr_elevation_bpm: float | None = None
+    rhr_source: str | None = None
+    lthr_estimate: float | None = None
     avg_stress_day: float | None = None
     sleep_score_day: float | None = None
     sleep_duration_min: float | None = None
