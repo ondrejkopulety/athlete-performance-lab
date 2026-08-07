@@ -88,10 +88,12 @@ def main() -> None:
         description="Garmin Training Analytics – pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    # default se schválně nechává None: argparse s nargs="*" validuje
+    # seznamový default proti choices jako jednu položku a spadne na
+    # "invalid choice: ['all']".
     parser.add_argument(
         "steps", nargs="*",
         choices=["sync", "load", "analyze", "status", "all"],
-        default=["all"],
         help="Které kroky spustit (výchozí: all)",
     )
     parser.add_argument("--skip-download", action="store_true",
@@ -104,7 +106,7 @@ def main() -> None:
                         help="Vypiš strojově čitelné shrnutí")
     args = parser.parse_args()
 
-    steps = set(args.steps)
+    steps = set(args.steps or ["all"])
     if "status" in steps and len(steps) == 1:
         _require_db()
         cmd_status()

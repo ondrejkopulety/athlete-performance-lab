@@ -135,6 +135,15 @@ class GarminNotFoundError(Exception):
     pass
 
 
+class GarminAuthError(Exception):
+    """Raised when stored tokens are missing or invalid.
+
+    Sync se musí přeskočit – opakované neautorizované pokusy jsou
+    nejrychlejší cesta k banu.
+    """
+    pass
+
+
 def _extract_http_status(exc: Exception) -> int | None:
     """Try to extract an HTTP status code from various exception types."""
     # requests.exceptions.HTTPError → .response.status_code
@@ -421,8 +430,8 @@ def authenticate(email: str, password: str) -> Garmin:
     (garth.refresh_oauth2, čisté api.login()) nejsou povoleny – každý
     neautorizovaný síťový pokus riskuje HTTP 429 a prodloužený ban.
 
-    Pokud tokeny chybí nebo jsou neplatné, skript zaloguje FATAL chybu
-    a okamžitě se ukončí (sys.exit(1)).
+    Pokud tokeny chybí nebo jsou neplatné, vyhodí GarminAuthError. Volající
+    musí sync přeskočit – další neautorizované pokusy by riskovaly ban.
     """
     logger.info("[INFO] Ověřuji se do Garmin Connect (pouze lokální tokeny)...")
 
@@ -433,13 +442,14 @@ def authenticate(email: str, password: str) -> Garmin:
         logger.info("[INFO] Session úspěšně obnovena z uložených tokenů")
         return api
     except Exception as e:
-        logger.error(
-            f"[FATAL] Nepodařilo se přihlásit pomocí lokálních tokenů: {e}\n"
-            f"  → Tokeny v {TOKEN_STORE}/ jsou neplatné nebo chybí.\n"
-            f"  → Spusť seed_token.py pro vygenerování nových tokenů.\n"
-            f"  → Skript se ukončuje, aby nedošlo k dalším síťovým pokusům."
-        )
-        sys.exit(1)
+        # Dřív tu bylo sys.exit(1). To je v CLI v pořádku, ale SystemExit
+        # nedědí z Exception, takže by proletěla i přes ošetření v main()
+        # a zabila celý uvicorn proces, kdyby sync běžel z API.
+        raise GarminAuthError(
+            f"Nepodařilo se přihlásit pomocí lokálních tokenů: {e}. "
+            f"Tokeny v {TOKEN_STORE}/ jsou neplatné nebo chybí – "
+            f"spusť scripts/seed_token.py pro vygenerování nových."
+        ) from e
 
 
 def sync_activities(

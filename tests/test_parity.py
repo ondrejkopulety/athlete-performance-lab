@@ -36,6 +36,36 @@ KNOWN_DIFFERENCES = {
 }
 
 
+BASELINE_ACTIVITIES_CSV = SUMMARIES_DIR / "master_high_res_summary.csv"
+
+
+def _comparable_until(session) -> "date | None":
+    """
+    Poslední den, který smí baseline popisovat.
+
+    Každá aktivita, která přibyla po vygenerování baseline, legitimně mění
+    metriky od svého data dál (rolling okna se dívají dozadu, takže starší
+    dny zůstávají nedotčené). Bez téhle hranice by test začal selhávat po
+    prvním syncu, přestože refaktor je v pořádku.
+    """
+    from datetime import timedelta
+
+    if not BASELINE_ACTIVITIES_CSV.exists():
+        return None
+    baseline_ids = set(
+        pd.read_csv(BASELINE_ACTIVITIES_CSV, dtype={"activity_id": str},
+                    usecols=["activity_id"], low_memory=False)["activity_id"]
+    )
+    activities = repo.read_activities(session, with_metrics=False)
+    if activities.empty:
+        return None
+
+    new = activities[~activities["activity_id"].isin(baseline_ids)]
+    if new.empty:
+        return None
+    return min(new["date"]) - timedelta(days=1)
+
+
 @pytest.fixture(scope="module")
 def frames():
     from src.db.session import SessionLocal, check_connection
@@ -52,6 +82,7 @@ def frames():
     s = SessionLocal()
     try:
         db = repo.read_daily_metrics(s)
+        cutoff = _comparable_until(s)
     finally:
         s.close()
     if db.empty:
@@ -59,12 +90,24 @@ def frames():
 
     db["date"] = pd.to_datetime(db["date"]).dt.date
     db = db.set_index("date")
-    return csv, db, csv.index.intersection(db.index)
+
+    common = csv.index.intersection(db.index)
+    if cutoff is not None:
+        common = common[common <= cutoff]
+        if len(common) == 0:
+            pytest.skip("Všechny dny baseline jsou ovlivněné novými aktivitami")
+    return csv, db, common
 
 
-def test_same_days_covered(frames):
+def test_baseline_days_are_present_in_db(frames):
+    """Každý den z baseline musí v databázi existovat (i dny bez tréninku)."""
     csv, db, common = frames
-    assert len(common) == len(csv), "Databáze neobsahuje všechny dny z baseline"
+    assert len(common) > 0
+    assert set(common) <= set(db.index)
+    # Dny baseline, které nejsou v porovnání, smí chybět jen proto, že je
+    # ovlivnila nová aktivita – ne proto, že by je databáze ztratila.
+    missing = set(csv.index) - set(db.index)
+    assert not missing, f"Databázi chybí dny z baseline: {sorted(missing)[:5]}"
 
 
 @pytest.mark.parametrize(
