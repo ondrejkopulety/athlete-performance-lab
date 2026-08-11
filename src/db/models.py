@@ -6,6 +6,8 @@ Návrhový princip: **surová fakta jsou oddělená od odvozených metrik.**
 
   activities        – co přišlo z FIT souboru; nikdy se nepřepočítává
   activity_metrics  – co jsme spočítali; nese metrics_version → přepočitatelné
+  activity_hr_curve – tepová křivka (max. průměr za okno); nese calc_version
+  activity_hr_blocks– souvislé bloky nad prahem; nese calc_version
   records           – vteřinová data (TimescaleDB hypertable)
   daily_biometrics  – denní vstupy z Garmin Connect API (HRV, spánek, RHR, stres)
   daily_metrics     – denní výstup analytiky (dřívější athlete_readiness.csv)
@@ -28,6 +30,8 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
+    SmallInteger,
     String,
     Text,
     func,
@@ -129,9 +133,13 @@ class ActivityMetrics(Base):
     climb_category: Mapped[str | None] = mapped_column(String(16))
 
     # S/U/V – R-R fyziologie
+    # aet_hr_dfa/ant_hr_dfa smí obsahovat jen práh spočítaný z R-R intervalů.
+    # Odhad z linearity tep↔rychlost patří výhradně do aet_hr_proxy – dokud
+    # se plnily oba stejnou hodnotou, vypadal proxy odhad jako výsledek DFA.
     aet_hr_dfa: Mapped[int | None] = mapped_column(Integer)
     ant_hr_dfa: Mapped[int | None] = mapped_column(Integer)
     aet_hr_proxy: Mapped[int | None] = mapped_column(Integer)
+    # rr_ok | unreliable | synthetic_rr | no_rr | failed  (viz physio/cli.py)
     dfa_quality: Mapped[str | None] = mapped_column(String(16))
     resp_rate_rsa: Mapped[float | None] = mapped_column(Float)
     # R-R intervaly (ms) uložené při načtení FIT → DFA/RSA se počítají bez
@@ -153,6 +161,15 @@ class ActivityMetrics(Base):
     dfa_alpha1_min: Mapped[float | None] = mapped_column(Float)
     dfa_alpha1_median: Mapped[float | None] = mapped_column(Float)
     dfa_window_count: Mapped[int | None] = mapped_column(Integer)
+
+    # Diagnostika R-R (src/physio) – čím se posuzuje, jestli řada vůbec nese
+    # variabilitu mezi tepy, a ne jen jestli ve FIT byly hrv zprávy.
+    rr_beat_count: Mapped[int | None] = mapped_column(Integer)
+    rr_artifact_pct: Mapped[float | None] = mapped_column(Float)
+    rr_zero_diff_pct: Mapped[float | None] = mapped_column(Float)
+    rr_unique_values: Mapped[int | None] = mapped_column(Integer)
+    rr_lattice_coverage: Mapped[float | None] = mapped_column(Float)
+    rr_authenticity: Mapped[str | None] = mapped_column(String(16))
 
     # R/Q/W – EPOC, práh, TATI
     epoc_score: Mapped[float | None] = mapped_column(Float)
@@ -200,6 +217,70 @@ class Record(Base):
     trimp_increment: Mapped[float | None] = mapped_column(Float)
 
     __table_args__ = (Index("ix_records_activity_ts", "activity_id", "timestamp"),)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ACTIVITY_HR_CURVE / ACTIVITY_HR_BLOCKS – předvýpočet pro dashboard
+# ═══════════════════════════════════════════════════════════════════════════
+# Obojí se z vteřinových dat nedá počítat za běhu, obojí je per-aktivita.
+# Na rozdíl od activity_metrics je klíč složený – jedna aktivita má víc
+# řádků (jeden na délku okna, resp. na kombinaci práh × tolerance), takže
+# to nejsou sloupce v activity_metrics.
+#
+# Klíčové rozhodnutí: prahy v bpm, ne zóny. Zóny se odvozují z LTHR, které
+# se mění; uložené zóny by při každé změně znamenaly přepočet historie.
+class ActivityHrCurve(Base):
+    """
+    Tepová křivka – maximální průměrný tep za dané okno.
+
+    Obdoba výkonové křivky, jen z tepu. Na LTHR nezávislá úplně: spočítá se
+    jednou a platí, dokud se nezmění samotná data nebo calc_version.
+    """
+
+    __tablename__ = "activity_hr_curve"
+
+    activity_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("activities.activity_id", ondelete="CASCADE"), primary_key=True
+    )
+    duration_s: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    max_mean_hr: Mapped[float] = mapped_column(Numeric(4, 1), nullable=False)
+
+    calc_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, index=True)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ActivityHrBlocks(Base):
+    """
+    Souvislé bloky nad prahem – jak dlouho se nad daným tepem vydrží v kuse.
+
+    ``bridge_tolerance_s`` je součástí klíče schválně: ukládají se obě
+    varianty vedle sebe. Nula ukazuje surovou fragmentaci, 15 s realistickou
+    souvislost úsilí, a rozdíl mezi nimi je sám o sobě informace.
+    """
+
+    __tablename__ = "activity_hr_blocks"
+
+    activity_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("activities.activity_id", ondelete="CASCADE"), primary_key=True
+    )
+    threshold_bpm: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bridge_tolerance_s: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    longest_block_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_time_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Součet úseků delších než HR_BLOCK_LONG_S – "kolik z toho času byla
+    # souvislá práce", ne posbírané vteřiny.
+    time_in_long_blocks_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    segment_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    median_segment_s: Mapped[float | None] = mapped_column(Numeric(6, 1))
+
+    calc_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, index=True)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

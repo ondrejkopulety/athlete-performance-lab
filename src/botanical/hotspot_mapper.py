@@ -93,6 +93,7 @@ from config.settings import (
 )
 
 from src.core.scoring import compute_confidence
+from src.ingestion.sport import normalize_sport
 
 from src.core.stop_analysis import (
     Record,
@@ -857,12 +858,7 @@ def main() -> None:
                 start_dt_scan: datetime | None = None
                 for msg in fitfile.get_messages("session"):
                     vals = msg.get_values()
-                    s = vals.get("sport")
-                    if s:
-                        sport = str(s)
-                    ss = vals.get("sub_sport")
-                    if ss:
-                        sport = f"{sport}/{ss}"
+                    sport = normalize_sport(vals.get("sport"), vals.get("sub_sport"))
                     ts = vals.get("start_time")
                     if isinstance(ts, datetime):
                         start_dt_scan = ts

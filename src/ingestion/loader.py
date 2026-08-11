@@ -31,12 +31,12 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from fitparse import FitFile
 from sqlalchemy.orm import Session
 
 from src.db import repository as repo
 from src.ingestion.dedup import canonical_fit_files, file_sha256
 from src.ingestion.fit_parser import parse_fit_to_memory
+from src.physio.rr_extract import extract_rr
 
 log = logging.getLogger("loader")
 
@@ -91,30 +91,19 @@ def extract_rr_intervals_ms(fit_path: str) -> list[float]:
 
     Ukládají se při načtení, aby DFA-alpha1 a RSA nemusely otevírat FIT
     soubor při každém běhu analytiky.
-    """
-    try:
-        fitfile = FitFile(fit_path)
-    except Exception as exc:
-        log.debug("R-R intervaly nelze načíst z %s: %s", fit_path, exc)
-        return []
 
-    rr_s: list[float] = []
-    try:
-        for msg in fitfile.get_messages("hrv"):
-            intervals = msg.get_values().get("time")
-            if intervals is None:
-                continue
-            if isinstance(intervals, (list, tuple)):
-                rr_s.extend(float(v) for v in intervals if v is not None and v > 0)
-            elif isinstance(intervals, (int, float)) and intervals > 0:
-                rr_s.append(float(intervals))
-    except Exception as exc:
-        log.debug("Chyba při čtení HRV zpráv z %s: %s", fit_path, exc)
+    Vlastní čtení dělá ``src.physio.rr_extract`` – jediné místo v repu, kde
+    se ``hrv`` zprávy parsují. Dřív existovaly tři kopie téhle logiky a
+    lišily se v tom, které hodnoty považují za platné.
+    """
+    extraction = extract_rr(fit_path)
+    if extraction.error:
+        log.debug("R-R intervaly nelze načíst z %s: %s", fit_path, extraction.error)
         return []
 
     # FIT ukládá R-R v sekundách; do DB jdou milisekundy (jednotka, se kterou
     # pracuje neurokit2 i všechny HRV vzorce).
-    return [round(v * 1000.0, 1) for v in rr_s]
+    return [round(v * 1000.0, 1) for v in extraction.rr_seconds]
 
 
 def _parse_worker(args: tuple) -> Optional[dict]:

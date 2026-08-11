@@ -48,10 +48,13 @@ from config.settings import (
     MAX_HR, RESTING_HR as BASELINE_RHR, ZONE_2_CAP,
     ZONES, ZONE_LABELS, FIT_DIR,
     DEFAULT_SPEED_THRESHOLD_MS, CYCLING_SPEED_THRESHOLD_MS,
+    HR_ONLY_MAX_MINUTES,
     TRIMP_K1, TRIMP_K2,
 )
 
 from datetime import timezone as _tz
+
+from src.ingestion.sport import normalize_sport
 
 
 def _to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
@@ -172,33 +175,14 @@ def trimp_increment(hr: Optional[int], duration_s: float, rhr: int, max_hr: int 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RMSSD Z HRV ZPRÁV FIT SOUBORU
+# Poznámka k R-R intervalům
 # ─────────────────────────────────────────────────────────────────────────────
-
-def compute_rmssd(rr_intervals_s: list[float]) -> Optional[float]:
-    if len(rr_intervals_s) < 2:
-        return None
-    diffs = [
-        ((rr_intervals_s[i + 1] - rr_intervals_s[i]) * 1000) ** 2
-        for i in range(len(rr_intervals_s) - 1)
-    ]
-    return math.sqrt(mean(diffs))
-
-
-def extract_rr_from_fit(fitfile: FitFile) -> list[float]:
-    rr: list[float] = []
-    try:
-        for msg in fitfile.get_messages("hrv"):
-            intervals = msg.get_values().get("time")
-            if intervals is None:
-                continue
-            if isinstance(intervals, (list, tuple)):
-                rr.extend(v for v in intervals if v is not None and v > 0)
-            elif isinstance(intervals, (int, float)) and intervals > 0:
-                rr.append(float(intervals))
-    except Exception as exc:
-        log.debug("HRV zprávy nelze přečíst: %s", exc)
-    return rr
+# Tenhle modul je producent vteřinové mřížky. R-R intervaly do ní nepatří:
+# 'hrv' zprávy mají jeden záznam na tep, takže se do vteřin nedají zarovnat.
+# Extrakci i posouzení R-R řeší src/physio, zápis do DB src/ingestion/loader.
+#
+# Dřív tu byly funkce extract_rr_from_fit a compute_rmssd. Jejich výsledek se
+# přiřadil do lokální proměnné workout_rmssd a nikde se nepoužil.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,6 +283,66 @@ def _safe_int(v) -> Optional[int]:
         return None
 
 
+def _parse_timestamp(value) -> Optional[datetime]:
+    """Čas záznamu jako naivní UTC – FIT dává datetime, Strava občas řetězec."""
+    if isinstance(value, datetime):
+        return _to_naive_utc(value)
+    if isinstance(value, str):
+        try:
+            return _to_naive_utc(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+    return None
+
+
+def _merge_record_fragments(raw_records: list[dict]) -> list[dict]:
+    """
+    Sloučí fragmenty jedné vteřiny do jednoho záznamu.
+
+    Strava exporty dělí jednu vteřinu do několika 'record' zpráv, každou
+    s jinou podmnožinou polí:
+
+        16:34:56  {distance: 1.12}
+        16:34:56  {speed: 0.855}
+        16:34:57  {heart_rate: 73}
+
+    Bez sloučení dostane fragment s tepem seg_s = 0 (rozdíl proti předchozímu
+    fragmentu téže vteřiny), takže nepřinese do zón ani do TRIMP nic. Ověřeno
+    na fotbalovém zápase 9438914736: 1030 z 1078 tepových fragmentů mělo
+    nulový časový krok a výsledek byl TRIMP 0,9 místo 28.
+
+    Semantika je shodná s repository.copy_records (GROUP BY timestamp,
+    poslední NEPRÁZDNÁ hodnota vyhrává) – parser tak počítá přesně nad daty,
+    která pak leží v tabulce records.
+
+    Garmin soubory mají jednu zprávu na vteřinu, takže funkce vrací tentýž
+    seznam (jen s normalizovaným časem). O(n) čas i paměť.
+    """
+    merged: list[dict] = []
+    index: dict[datetime, int] = {}
+
+    for raw in raw_records:
+        ts_dt = _parse_timestamp(raw.get("timestamp"))
+
+        if ts_dt is None:
+            # Bez času není podle čeho slučovat. Řádek necháme samostatně,
+            # ať se z něj neztratí data; loader ho do DB stejně nezapíše.
+            merged.append({**raw, "timestamp": None})
+            continue
+
+        pos = index.get(ts_dt)
+        if pos is None:
+            index[ts_dt] = len(merged)
+            merged.append({**raw, "timestamp": ts_dt})
+        else:
+            target = merged[pos]
+            for key, value in raw.items():
+                if value is not None:
+                    target[key] = value
+
+    return merged
+
+
 def parse_fit_file(
     file_path: str,
     highres_writer: csv.DictWriter,
@@ -337,6 +381,16 @@ def parse_fit_file(
             activity_id, len(raw_records),
         )
 
+    # Sloučení fragmentů MUSÍ přijít před interpolací altitude/speed níž –
+    # ty série jsou poziční nad raw_records, po sloučení by jinak nesedělo
+    # indexování. Vedlejší efekt: limit=15 u interpolace konečně znamená
+    # 15 vteřin, ne ~7 vteřin rozsekaných na fragmenty.
+    _n_raw = len(raw_records)
+    raw_records = _merge_record_fragments(raw_records)
+    if len(raw_records) < _n_raw:
+        log.info("[%s] Sloučeno %d fragmentů do %d vteřin (Strava export).",
+                 activity_id, _n_raw, len(raw_records))
+
     # Session-level metriky (fyzické, výkonnostní)
     session_distance: Optional[float] = None
     session_ascent: Optional[float] = None
@@ -354,12 +408,7 @@ def parse_fit_file(
     # Sport + datum + fyzické/výkonnostní metriky ze 'session' zprávy
     for msg in fitfile.get_messages("session"):
         vals = msg.get_values()
-        s = vals.get("sport")
-        if s:
-            sport = str(s)
-        ss = vals.get("sub_sport")
-        if ss:
-            sport = f"{sport}/{ss}"
+        sport = normalize_sport(vals.get("sport"), vals.get("sub_sport"))
         if act_date is None:
             ts = vals.get("start_time")
             if isinstance(ts, datetime):
@@ -410,10 +459,6 @@ def parse_fit_file(
         log.debug("[%s] Cycling sport detected (%s) → speed threshold %.3f m/s",
                   activity_id, sport, speed_threshold)
 
-    # HRV z FIT (RMSSD z R-R intervalů)
-    rr_intervals   = extract_rr_from_fit(fitfile)
-    workout_rmssd  = compute_rmssd(rr_intervals) if rr_intervals else None
-
     # Interpolace altitude + speed (preferuj enhanced_speed → speed)
     # ── Pandas-based interpolation (C-optimized, replaces Python while-loop) ─
     altitudes_series = pd.Series([_safe_float(r.get("altitude") or r.get("enhanced_altitude")) for r in raw_records]).infer_objects(copy=False)
@@ -426,6 +471,28 @@ def parse_fit_file(
     altitudes = altitudes_series.tolist()
     speeds = speeds_series.tolist()
 
+    # ── Doplnění mezer v tepu ───────────────────────────────────────────────
+    # Strava vzorkuje tep zhruba jednou za pět vteřin (1078 vzorků na 5846 s
+    # jednoho zápasu). Samotné sloučení fragmentů proto nestačí: každá vteřina
+    # s tepem by přinesla jednu vteřinu zóny místo pěti, které zastupuje.
+    # Doplňujeme stejně, jako se výš doplňuje altitude a speed – poslední
+    # naměřenou hodnotou, nejvýš 15 ZÁZNAMŮ dopředu. U vteřinového záznamu
+    # je to 15 vteřin; u řídce nahrávaných souborů odpovídajícím způsobem
+    # víc, ale každý záznam si stejně nese nejvýš 120 s (strop v segs).
+    # Delší díra zůstane prázdná, protože o tepu v ní nic nevíme.
+    #
+    # POZOR: doplněný tep slouží VÝHRADNĚ k akumulaci zón a TRIMP. Do CSV,
+    # do avg_hr i do max_hr jde dál jen skutečně naměřená hodnota – jinak by
+    # se dopočítaný tep propsal do records.heart_rate a odtud do všech
+    # tepových analytik.
+    hr_series = pd.Series(
+        [_safe_int(r.get("heart_rate")) for r in raw_records], dtype="float64"
+    )
+    hr_effective = [
+        int(v) if v == v else None  # NaN != NaN
+        for v in hr_series.ffill(limit=15).tolist()
+    ]
+
     # ── Paused intervals (event messages – timer stop/start) ─────────────────
     # Build a list of (pause_start, resume_ts) tuples so records that fall
     # within a paused window are correctly marked is_active=False, even when
@@ -437,7 +504,7 @@ def parse_fit_file(
             _ev_vals = _ev_msg.get_values()
             _ev_name  = str(_ev_vals.get("event",      "")).lower()
             _ev_type  = str(_ev_vals.get("event_type", "")).lower()
-            _ev_ts    = _ev_vals.get("timestamp")
+            _ev_ts    = _to_naive_utc(_ev_vals.get("timestamp"))
             if not isinstance(_ev_ts, datetime):
                 continue
             if _ev_name == "timer" and _ev_type in ("stop", "stop_disable", "stop_disable_all"):
@@ -455,31 +522,61 @@ def parse_fit_file(
             return False
         return any(p0 <= ts <= p1 for p0, p1 in _paused_intervals)
 
+    # ── Délka segmentů ──────────────────────────────────────────────────────
+    # Strop 120 s brání tomu, aby výpadek nahrávání nafoukl zátěž – stejná
+    # konstanta jako v compute_trimp_from_records. Počítáme dopředu, protože
+    # segmenty potřebuje i pojistka níž.
+    segs: list[float] = []
+    _prev_ts: Optional[datetime] = None
+    for raw in raw_records:
+        _ts = raw.get("timestamp")
+        segs.append(
+            max(0.0, min(120.0, (_ts - _prev_ts).total_seconds()))
+            if (_ts and _prev_ts) else 1.0
+        )
+        _prev_ts = _ts
+
+    # ── Pojistka proti „aktivitě v tašce" ───────────────────────────────────
+    # Vteřiny bez pohybu, ale s tepem, se nově počítají jako trénink (viz
+    # is_active níž). Silový trénink, jóga i squash mají rychlost 0 po celou
+    # dobu, a přesto to je zátěž. Šest hodin tepu 107–141 bez jediného
+    # záznamu rychlosti (Apple import 10784092814 z 2024-02-17) je ale
+    # zapomenuté měření, ne trénink – přineslo by ~280 TRIMP navíc.
+    #
+    # Tepový práh je nerozliší: klid mezi sériemi v posilovně má 73–99, ten
+    # noční import 107–141. Délka souvislého úseku taky ne – silový trénink
+    # je jeden 88minutový blok. Jediný signál je celkový objem.
+    hr_only_seconds = sum(
+        segs[i] for i, raw in enumerate(raw_records)
+        if raw.get("heart_rate") is not None
+        and not (speeds[i] is not None and speeds[i] > speed_threshold)
+        and not _in_pause(raw.get("timestamp"))
+    )
+    hr_only_credit = hr_only_seconds <= HR_ONLY_MAX_MINUTES * 60.0
+    if not hr_only_credit:
+        log.warning(
+            "[%s] %.0f min tepu bez pohybu (limit %.0f) – počítám jen pohyb "
+            "a zóny Z2+ (podezření na zapomenuté měření).",
+            activity_id, hr_only_seconds / 60.0, HR_ONLY_MAX_MINUTES,
+        )
+
     # Akumulátory
     hr_values: list[int] = []
     zone_times: dict[str, float] = defaultdict(float)
     total_trimp = 0.0
     records_count = 0
-    prev_ts: Optional[datetime] = None
     active_seconds: float = 0.0        # čas is_active=True (pro správný výpočet duration)
     uphill_seconds: float = 0.0        # čas stoupání s pohybem (pro VAM)
     prev_alt: Optional[float] = None   # předchozí nadmořská výška pro detekci stoupání
 
     for idx, raw in enumerate(raw_records):
-        ts = raw.get("timestamp")
-        ts_dt: Optional[datetime] = ts if isinstance(ts, datetime) else None
-        if ts_dt is None and isinstance(ts, str):
-            try:
-                ts_dt = datetime.fromisoformat(ts)
-            except ValueError:
-                pass
-        # Normalize tz-aware timestamps (e.g. Strava exports) to naive UTC
-        ts_dt = _to_naive_utc(ts_dt)
+        # Čas i segment jsou předpočítané: _merge_record_fragments už
+        # timestamp znormalizoval na naivní UTC, segs má délky mezi vteřinami.
+        ts_dt: Optional[datetime] = raw.get("timestamp")
+        seg_s = segs[idx]
 
-        seg_s = max(0.0, min(120.0, (ts_dt - prev_ts).total_seconds())) if (ts_dt and prev_ts) else 1.0
-        prev_ts = ts_dt
-
-        hr   = _safe_int(raw.get("heart_rate"))
+        hr   = _safe_int(raw.get("heart_rate"))   # naměřený – jde do CSV a avg_hr
+        hr_eff = hr_effective[idx]                # s doplněnými mezerami – jen pro zóny a TRIMP
         spd  = speeds[idx]
         dist = _safe_float(raw.get("distance"))
         alt  = altitudes[idx]
@@ -498,32 +595,33 @@ def parse_fit_file(
         lat_deg = raw_lat * (180.0 / (2**31)) if raw_lat is not None else None
         lon_deg = raw_lon * (180.0 / (2**31)) if raw_lon is not None else None
 
-        # Zone must be computed before is_active so the HR-zone fallback works.
-        zone = classify_zone(hr, zones)
-        # A record is active when:
-        #  (a) speed is above threshold (normal forward movement), OR
-        #  (b) speed is low/zero but HR is in Z2 or higher
-        #      (steep climb, technical stop, track change in cycling).
-        # Pause detection wins in both cases.
-        _above_speed = spd is not None and spd > speed_threshold
-        # Exclude both Z1 and empty string: classify_zone returns "" when HR
-        # is missing, which must NOT be treated as an active high-HR zone.
-        _above_z1    = zone is not None and zone not in ("Z1", "")
-        is_active = (_above_speed or _above_z1) and not _in_pause(ts_dt)
+        # Zóna se počítá před is_active – tepová záloha na ní stojí.
+        zone = classify_zone(hr_eff, zones)
 
-        t_inc = trimp_increment(hr, seg_s, rhr)
+        _moving = spd is not None and spd > speed_threshold
+        # Naměřený tep je sám o sobě důkazem zátěže: silový trénink, jóga
+        # a squash mají rychlost 0 po celou dobu, a přesto to je trénink.
+        # Dřív se počítal jen pohyb nebo zóna Z2+, takže těmhle aktivitám
+        # vyšly nulové zóny a duration spadlo na records_count / 60.
+        #
+        # Když pojistka výš zabere (podezření na zapomenuté měření), platí
+        # zase jen původní pravidlo: bez pohybu se počítá pouze Z2 a výš.
+        _hr_effort = hr_eff is not None and (
+            hr_only_credit or zone not in ("Z1", "")
+        )
+        is_active = (_moving or _hr_effort) and not _in_pause(ts_dt)
+
+        t_inc = trimp_increment(hr_eff, seg_s, rhr)
         if hr is not None:
             hr_values.append(hr)
-        # Only accumulate TRIMP and zone time during active movement;
-        # stationary/paused intervals (rest between sets, traffic lights)
-        # must not inflate the training load metrics.
+
+        # Zóny, TRIMP i aktivní čas rostou na jedné a téže podmínce – díky
+        # tomu platí Σ(zóny) ≤ duration_minutes (rovnost tam, kde tep
+        # nechybí; vteřiny s pohybem bez tepu žádnou zónu nemají).
         if is_active:
             total_trimp += t_inc
             if zone:
                 zone_times[zone] += seg_s / 60.0
-
-        # Active-time accumulator (used for duration_min – avoids bag-activity inflation)
-        if is_active:
             active_seconds += seg_s
 
         # Uphill-time accumulator (used for VAM in athlete_analytics.py)

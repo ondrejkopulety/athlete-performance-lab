@@ -8,10 +8,12 @@ main.py – Garmin Training Analytics · CLI
     python scripts/main.py load               # jen FIT soubory → databáze
     python scripts/main.py analyze            # jen přepočet metrik
     python scripts/main.py export             # CSV exporty z databáze
+    python scripts/main.py splits             # CSV po jednotlivých cyklo trénincích
     python scripts/main.py status             # co je v databázi
 
     python scripts/main.py analyze --force-metrics   # přepočítat i aktuální metriky
     python scripts/main.py load --force              # přeparsovat všechny FIT
+    python scripts/main.py splits --force            # přepsat i existující splity
     python scripts/main.py --skip-download           # celá pipeline bez sítě
 
 Proti původní verzi zmizel krok `parse`: zapisoval CSV, které žádný další
@@ -94,13 +96,14 @@ def main() -> None:
     # "invalid choice: ['all']".
     parser.add_argument(
         "steps", nargs="*",
-        choices=["sync", "load", "analyze", "export", "status", "all"],
-        help="Které kroky spustit (výchozí: all)",
+        choices=["sync", "load", "analyze", "export", "splits", "status", "all"],
+        help="Které kroky spustit (výchozí: all; splits v all nejsou, viz --help)",
     )
     parser.add_argument("--skip-download", action="store_true",
                         help="Vynech stahování z Garminu, pracuj s lokálními soubory")
     parser.add_argument("--force", action="store_true",
-                        help="load: přeparsuj všechny FIT soubory bez ohledu na hash")
+                        help="load: přeparsuj všechny FIT soubory bez ohledu na hash; "
+                             "splits: přepiš i splity, které už na disku jsou")
     parser.add_argument("--force-metrics", action="store_true",
                         help="analyze: přepočítej i aktivity s aktuální verzí metrik")
     parser.add_argument("--json", action="store_true",
@@ -151,6 +154,12 @@ def main() -> None:
 
             with session_scope() as session:
                 report["export"] = export_all(session)
+
+        if "splits" in steps:
+            from src.analytics.exports import export_cycling_splits
+
+            with session_scope() as session:
+                report["splits"] = export_cycling_splits(session, force=args.force)
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))

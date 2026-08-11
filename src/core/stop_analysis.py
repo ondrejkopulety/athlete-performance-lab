@@ -53,6 +53,7 @@ from config.settings import (
     ENABLE_EXCLUSION_ZONES,
     CARDIO_SPORTS,
 )
+from src.ingestion.sport import normalize_sport
 
 log = logging.getLogger(__name__)
 
@@ -210,12 +211,7 @@ def parse_fit_records(
     try:
         for msg in fitfile.get_messages("session"):
             vals = msg.get_values()
-            s = vals.get("sport")
-            if s:
-                sport = str(s)
-            ss = vals.get("sub_sport")
-            if ss:
-                sport = f"{sport}/{ss}"
+            sport = normalize_sport(vals.get("sport"), vals.get("sub_sport"))
             ts = vals.get("start_time")
             if isinstance(ts, datetime):
                 start_dt = ts

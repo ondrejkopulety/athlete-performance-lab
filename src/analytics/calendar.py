@@ -10,9 +10,19 @@ Dvě pravidla, na kterých záleží:
      existovat – jinak by se zahodila ranní biometrie (HRV, spánek, RHR),
      která dorazí ze zápěstí dřív než jakákoli aktivita.
 
-  2. **Začátek je nejstarší záznam z JAKÉHOKOLI zdroje**, ne jen z aktivit.
-     Původní implementace startovala první aktivitou, takže biometrie
-     z období před prvním zaznamenaným tréninkem se ztrácela.
+  2. **Začátek je první aktivita**, ne první biometrie.
+
+     Chvíli to bylo naopak – osa začínala nejstarším záznamem z jakéhokoli
+     zdroje, aby se neztratila biometrie z doby před prvním tréninkem.
+     Jenže Apple Health sahá do roku 2017, kdežto tréninková data začínají
+     až 2022, takže vzniklo 1495 dní, kde TRIMP je nula, CTL i ATL jsou
+     nula, a readiness_score proto vychází na pevných 75 bodů (fixní bod
+     vzorce při TSB = 0, ne zapsaná konstanta). To vypadá jako data, ale
+     není to nic – jen tvar rovnice. Průměry a korelace přes celou historii
+     to táhlo k té konstantě.
+
+     Biometrie bez jediného tréninku se tedy zahazuje záměrně: bez zátěže
+     nemá připravenost k čemu být připravená.
 """
 
 from __future__ import annotations
@@ -41,14 +51,14 @@ def build_calendar(
     end: date | None = None,
 ) -> pd.DatetimeIndex:
     """
-    Souvislá denní osa (bez děr) od nejstaršího dat po dnešek.
+    Souvislá denní osa (bez děr) od první aktivity po dnešek.
 
     `start` / `end` slouží pro inkrementální přepočet dílčího okna.
-    Vrací prázdný index, pokud v databázi nejsou žádná data.
+    Vrací prázdný index, pokud v databázi nejsou žádné aktivity.
     """
     end = end or today_local()
     if start is None:
-        start = repo.min_data_date(session)
+        start = repo.min_activity_date(session)
     if start is None:
         return pd.DatetimeIndex([], name="date")
     if start > end:

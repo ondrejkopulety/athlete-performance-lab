@@ -47,6 +47,7 @@ from config.settings import (
     WARMUP_SECONDS,
     ZONES as ATHLETE_ZONES,
 )
+from src.physio.quality import assess_rr_authenticity
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 log = logging.getLogger("analytics.activity")
@@ -414,23 +415,32 @@ def dfa_alpha1_thresholds(rr_ms: list[float] | None, tdata: pd.DataFrame) -> dic
     z linearity HR vs rychlost (modul S).
     """
     result = {
-        "aet_hr_dfa": None, "ant_hr_dfa": None, "dfa_quality": "none",
+        "aet_hr_dfa": None, "ant_hr_dfa": None, "dfa_quality": "no_rr",
         "dfa_alpha1_min": None, "dfa_alpha1_median": None, "dfa_window_count": None,
     }
 
-    def _fallback() -> dict:
-        proxy = dfa_alpha1_proxy(tdata)
-        if proxy is not None:
-            result["aet_hr_dfa"] = proxy
-            result["dfa_quality"] = "proxy"
+    if not rr_ms or len(rr_ms) < DFA_WINDOW_BEATS:
         return result
 
-    if not HAS_NEUROKIT or not rr_ms or len(rr_ms) < DFA_WINDOW_BEATS:
-        return _fallback()
+    # Přítomnost R-R ještě neznamená, že nesou variabilitu mezi tepy. Bez téhle
+    # kontroly se počítalo α1 ≈ 1,56 z kvantizované tepové křivky a výsledek
+    # vypadal jako platná diagnostika metody, ne jako vlastnost vstupu.
+    authenticity = assess_rr_authenticity(np.asarray(rr_ms, dtype=float) / 1000.0)
+    if not authenticity.usable:
+        result["dfa_quality"] = (
+            "synthetic_rr" if authenticity.verdict == "synthetic" else "no_rr"
+        )
+        return result
+
+    if not HAS_NEUROKIT:
+        result["dfa_quality"] = "failed"
+        log.debug("neurokit2 není k dispozici – DFA se nepočítá.")
+        return result
 
     rr_clean = clean_rr_intervals(rr_ms)
     if len(rr_clean) < DFA_WINDOW_BEATS:
-        return _fallback()
+        result["dfa_quality"] = "unreliable"
+        return result
 
     hr_alpha_pairs: list[tuple[float, float]] = []
     for start in range(0, len(rr_clean) - DFA_WINDOW_BEATS + 1, DFA_SLIDE_BEATS):
@@ -446,15 +456,16 @@ def dfa_alpha1_thresholds(rr_ms: list[float] | None, tdata: pd.DataFrame) -> dic
             continue
 
     if len(hr_alpha_pairs) < 10:
-        return _fallback()
+        result["dfa_quality"] = "unreliable"
+        return result
 
     pairs = sorted(hr_alpha_pairs, key=lambda x: x[0])
     hrs = np.array([p[0] for p in pairs])
     alphas = np.array([p[1] for p in pairs])
 
-    # Diagnostika: na těchhle datech alpha1 systematicky nesestupuje k 0.5,
-    # takže prahy nevznikají. Ukládá se, aby bylo z dat vidět, kde metoda
-    # funguje a kde ne – místo hádání.
+    # Diagnostika: ukládá se, aby bylo z dat vidět, kde metoda funguje a kde
+    # ne – místo hádání. Nad kvantizovanou tepovou křivkou tady vycházelo
+    # α1 ≈ 1,56; tomu teď předchází kontrola pravosti R-R výš.
     result["dfa_alpha1_min"] = round(float(alphas.min()), 3)
     result["dfa_alpha1_median"] = round(float(np.median(alphas)), 3)
     result["dfa_window_count"] = len(pairs)
@@ -485,7 +496,7 @@ def dfa_alpha1_thresholds(rr_ms: list[float] | None, tdata: pd.DataFrame) -> dic
 
     result["aet_hr_dfa"] = int(aet_hr) if aet_hr else None
     result["ant_hr_dfa"] = int(ant_hr) if ant_hr else None
-    result["dfa_quality"] = "real"
+    result["dfa_quality"] = "rr_ok"
     return result
 
 
@@ -755,10 +766,11 @@ def compute_trimp_from_records(tdata: pd.DataFrame, rhr: float) -> Optional[floa
     konstantu ze settings, ale klidový tep se v čase mění. Stejný tep při
     RHR 44 a při RHR 52 znamená jinou relativní zátěž.
 
-    Ověřeno proti parseru se stejným RHR: 98 % aktivit sedí do ±1 %.
-    Zbytek jsou fragmentované Strava soubory, kde parser počítal nulu za
-    vteřiny, jejichž fragment s tepem měl nulový časový krok – tam je
-    přepočet ze sloučených dat správnější.
+    Výsledek má přednost před parserovým total_trimp (viz load.py), takže
+    tenhle přepočet musí sedět s parserem ve všem ostatním – proto se tu
+    doplňují mezery v tepu stejně jako v parseru (poslední naměřená hodnota,
+    nejvýš 15 záznamů dopředu). Bez toho by u Strava exportů, které vzorkují
+    tep jednou za pět vteřin, vyšla čtyři pětiny zátěže nulové.
     """
     if tdata.empty or "heart_rate" not in tdata.columns:
         return None
@@ -768,7 +780,12 @@ def compute_trimp_from_records(tdata: pd.DataFrame, rhr: float) -> Optional[floa
         return None
 
     df = tdata.sort_values("timestamp")
-    hr = pd.to_numeric(df["heart_rate"], errors="coerce").to_numpy(dtype=float)
+    # ffill(limit=15) zrcadlí hr_effective v parseru – viz docstring.
+    hr = (
+        pd.to_numeric(df["heart_rate"], errors="coerce")
+        .ffill(limit=15)
+        .to_numpy(dtype=float)
+    )
 
     # Časový krok mezi záznamy, stejně jako v parseru: strop 120 s brání
     # tomu, aby dlouhá pauza v nahrávání nafoukla zátěž.
@@ -864,6 +881,9 @@ def compute_activity_series_metrics(
         "aet_hr_dfa": dfa["aet_hr_dfa"],
         "ant_hr_dfa": dfa["ant_hr_dfa"],
         "dfa_quality": dfa["dfa_quality"],
-        "aet_hr_proxy": dfa_alpha1_proxy(tdata) if dfa["dfa_quality"] == "real" else dfa["aet_hr_dfa"],
+        # Proxy se počítá vždy a zůstává jen tady. Dřív se při chybějící DFA
+        # propsal i do aet_hr_dfa, takže odhad ze zlomu linearity tep↔rychlost
+        # vystupoval jako práh spočítaný z R-R intervalů.
+        "aet_hr_proxy": dfa_alpha1_proxy(tdata),
         "resp_rate_rsa": respiration_from_rr(rr_ms),
     }

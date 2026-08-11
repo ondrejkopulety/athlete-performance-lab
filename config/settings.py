@@ -24,6 +24,8 @@ FIT_DIR         = DATA_DIR / "fit"
 STRAVA_FIT_DIR  = FIT_DIR / "strava_originals"
 SUMMARIES_DIR   = DATA_DIR / "summaries"
 PROCESSED_DIR   = DATA_DIR / "processed"
+SPLITS_DIR      = DATA_DIR / "cycling_splits"
+RR_DIR          = DATA_DIR / "rr"          # {activity_id}_rr.csv – jeden řádek na tep
 REPORTS_DIR     = PROJECT_ROOT / "reports"
 LOGS_DIR        = PROJECT_ROOT / "logs"
 
@@ -121,10 +123,41 @@ DFA_AET_THRESHOLD      = 0.75  # α1 at aerobic threshold
 DFA_ANT_THRESHOLD      = 0.50  # α1 at anaerobic threshold
 
 # ============================================================
+# R-R INTERVALY (src/physio)
+# ============================================================
+# Platný rozsah jednoho R-R intervalu [s] – 0,2 s = 300 bpm, 3,0 s = 20 bpm.
+# Mimo tenhle rozsah nejde o tep, ale o chybu přenosu.
+RR_MIN_SECONDS              = 0.2
+RR_MAX_SECONDS              = 3.0
+
+# Filtr artefaktů: odchylka od klouzavého mediánu okolních tepů.
+RR_ARTIFACT_TOLERANCE       = 0.20   # 20 % od mediánu = artefakt
+RR_ARTIFACT_MEDIAN_WINDOW   = 11     # tepů, liché (symetrické okno)
+RR_UNRELIABLE_ARTIFACT_PCT  = 0.10   # nad 10 % artefaktů je aktivita nespolehlivá
+
+# Rozlišení skutečného R-R od dopočítané tepové křivky (viz physio/quality.py).
+# Prahy jsou vybrané s velkou rezervou: naměřená data mají 63–74 % nulových
+# rozdílů a obsazenost mřížky 0,17–0,34, skutečné R-R by mělo mít nulových
+# rozdílů jednotky procent a obsazenost blízko 1.
+RR_AUTHENTICITY_MIN_BEATS   = 300    # míň tepů na verdikt nestačí
+RR_MAX_ZERO_DIFF_PCT        = 0.30   # nad 30 % shodných sousedů → dopočítané
+RR_MIN_LATTICE_COVERAGE     = 0.50   # pod 50 % obsazené mřížky 1 ms → dopočítané
+
+# ============================================================
 # SPEED THRESHOLDS
 # ============================================================
 DEFAULT_SPEED_THRESHOLD_MS  = 0.3     # m/s – general
 CYCLING_SPEED_THRESHOLD_MS  = 0.833   # m/s – 3.0 km/h
+
+# Vteřiny bez pohybu, ale s naměřeným tepem, se počítají jako trénink –
+# silový trénink, jóga i squash mají rychlost 0 po celou dobu.
+# Strop je pojistka proti „aktivitě v tašce": Apple import 10784092814
+# (2024-02-17, 21:18–03:24) má šest hodin tepu 107–141 bez jediného
+# záznamu rychlosti a bez stropu by přinesl ~280 TRIMP, které nikdo
+# neodtrénoval. Nejdelší legitimní stacionární trénink v datech má 89 min,
+# takže 180 min je bezpečně nad ním. Při překročení platí původní pravidlo
+# (bez pohybu se počítá jen Z2 a výš).
+HR_ONLY_MAX_MINUTES = 180.0
 
 # ============================================================
 # GARMIN SYNC
@@ -245,12 +278,15 @@ DATABASE_URL: str = os.getenv("DATABASE_URL") or (
 # u všech aktivit (řádky s nižší verzí se považují za zastaralé).
 #   2 = TRIMP z klidového tepu platného k datu, LTHR z terénních dat,
 #       oprava parametru DFA-alpha1
-ACTIVITY_METRICS_VERSION: int = 2
+#   3 = sloučení fragmentů Strava exportů, stacionární tep se počítá do zón,
+#       doplněné mezery v tepu, kanonický název sportu
+ACTIVITY_METRICS_VERSION: int = 3
 
 # Bump when a daily formula changes → vynutí full rebuild daily_metrics.
 #   2 = 90denní baseline klidového tepu, lthr_estimate
 #   3 = zrušena recovery_tax_hours_daily, přibyl Garmin Training Readiness
-DAILY_METRICS_VERSION: int = 3
+#   4 = osa začíná první aktivitou, ne první biometrií (viz calendar.py)
+DAILY_METRICS_VERSION: int = 4
 
 # ============================================================
 # PRAHOVÝ TEP Z TERÉNNÍCH DAT (LTHR)
@@ -268,6 +304,60 @@ LTHR_FACTOR            = 0.95  # převod 20min výkonu na hodinový práh
 # Při 180 dnech vychází 172 bpm, tedy shoda s laktátovým testem.
 LTHR_WINDOW_DAYS       = 180   # okno, ve kterém se hledá nejlepší úsilí
 LTHR_BEST_WINDOWS_MIN  = [20, 30, 60]  # která okna počítat per-activity
+
+# ============================================================
+# TEPOVÁ KŘIVKA A SOUVISLÉ BLOKY (src/physio/hr_curve.py, hr_blocks.py)
+# ============================================================
+# Předvýpočet pro dashboard: obojí se z vteřinových dat nedá počítat za běhu.
+#
+# Metriky se ukládají na mřížce ABSOLUTNÍCH PRAHŮ, ne v zónách. Zóny se
+# odvozují z LTHR, které se mění (172 → 177 → po terénním testu znovu) a
+# uložené zóny by znamenaly přepočet celé historie při každé změně. Takhle
+# je zóna jen lookup: "Z4 při LTHR 177" = práh 168 → nejbližší řádek.
+HR_GRID_FFILL_LIMIT_S = 5      # jak dlouhou díru v tepu ještě dopnout ffillem
+
+# Pod tímhle pokrytím se aktivita v reportu označí varováním. Nepočítá se
+# z ní nic jiného než u ostatních – jen je vidět, že čísla stojí na polovině
+# dat. Jízda 12. 7. 2026 má pokrytí 54 % (403 min rozsahu, jedna díra 56 min),
+# jízda 11. 4. 2026 má 59 % kvůli 26minutovému výpadku tepu uprostřed jízdy.
+#
+# Pokrytí se měří AŽ PO doplnění mezer, ne na hustotě vzorků: 305 z 799
+# aktivit má Smart Recording se vzorkem po 5 s, tedy hustotu kolem 20 % při
+# plné použitelnosti mřížky. Kdyby varování viselo na hustotě, křičelo by
+# u 588 aktivit a skutečné výpadky by v tom zapadly.
+HR_COVERAGE_WARN_PCT = 80.0
+
+# Tepová křivka – maximální průměrný tep za dané okno. Na LTHR nezávislá
+# úplně: spočítá se jednou a platí, dokud se nezmění samotná data.
+HR_CURVE_DURATIONS_S = [5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600]
+
+# Souvislé bloky nad prahem. Mřížka pokrývá Z2 až Z5 (viz ZONES).
+HR_BLOCK_THRESHOLDS_BPM = list(range(135, 186, 5))   # 135, 140, … 185
+
+# Vyhlazení tepu před segmentací. Bez něj šum na hranici prahu vyrábí
+# umělé úseky: na jízdě 26. 7. dává syrový tep 54 úseků s mediánem 10 s,
+# po vyhlazení 30 úseků – celkový čas i nejdelší úsek se přitom nemění
+# (37,9 vs 37,0 min; 4,4 vs 4,4 min). Vyhlazuje se jen segmentace, ne
+# tepová křivka – tam je průměrování už v definici metriky.
+HR_BLOCK_SMOOTH_S = 10
+
+# Přemostění krátkého propadu pod práh. Obě varianty se počítají a ukládají
+# (tolerance je součástí primárního klíče): 0 ukazuje surovou fragmentaci,
+# 15 s realistickou souvislost úsilí.
+HR_BLOCK_BRIDGE_TOLERANCES_S = [0, 15]
+# Podmínka na hloubku propadu je stejně důležitá jako jeho délka. Bez ní se
+# přes sjezd spojí dvě opravdu oddělená úsilí a metrika ztratí smysl.
+HR_BLOCK_BRIDGE_MAX_DROP_BPM = 5
+# Délka, nad kterou se úsek počítá jako "dlouhý" (time_in_long_blocks_s).
+HR_BLOCK_LONG_S = 180
+
+# Verze výpočtu → sloupec calc_version. Bumpni při každé změně pravidel
+# (vyhlazení, přemostění, příprava streamu), ať je z dat poznat, která
+# čísla vznikla jakou logikou.
+#   1 = první verze: 1 Hz mřížka, ffill 5 s, vyhlazení 10 s, přemostění
+#       s podmínkou na hloubku propadu
+HR_CURVE_VERSION: int = 1
+HR_BLOCKS_VERSION: int = 1
 
 # Kolik dní historie načíst před prvním "dirty" dnem, aby rolling okna
 # (monotony 7d, ACWR 7/28d, polarizace 14d, HRV z-score 30d, strain kvantil 30d)
@@ -524,5 +614,21 @@ METRIC_META: dict[str, dict] = {
         "unit": "bpm·min", "direction": "neutral",
         "note": "Time Above Threshold Impulse – akumulovaná práce nad Critical HR "
                 "(Monod-Scherrer adaptovaný na tep).",
+    },
+    "hr_curve": {
+        "unit": "bpm", "direction": "higher_is_better",
+        "note": "Tepová křivka (activity_hr_curve): maximální průměrný tep za okno "
+                f"{HR_CURVE_DURATIONS_S[0]}–{HR_CURVE_DURATIONS_S[-1]} s. Obdoba "
+                "výkonové křivky. Na LTHR nezávislá – nepřepočítává se při změně prahu. "
+                "Okno musí být plně pokryté daty, jinak řádek nevznikne.",
+    },
+    "hr_blocks": {
+        "unit": "s", "direction": "higher_is_better",
+        "note": "Souvislé bloky nad prahem (activity_hr_blocks): jak dlouho atlet "
+                "vydrží nad daným tepem V KUSE. Ze 'času v zónách' se to vyčíst nedá – "
+                "131 minut nad prahem může být 272 úseků s mediánem 6 s. Ukládá se na "
+                f"mřížce absolutních prahů {HR_BLOCK_THRESHOLDS_BPM[0]}–"
+                f"{HR_BLOCK_THRESHOLDS_BPM[-1]} bpm, zóna je až lookup podle LTHR. "
+                f"Dvě varianty přemostění: {HR_BLOCK_BRIDGE_TOLERANCES_S} s.",
     },
 }

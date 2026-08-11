@@ -24,6 +24,8 @@ from sqlalchemy.orm import Session
 
 from src.db.models import (
     Activity,
+    ActivityHrBlocks,
+    ActivityHrCurve,
     ActivityMetrics,
     DailyBiometrics,
     DailyMetrics,
@@ -133,6 +135,98 @@ def upsert_activities(session: Session, rows: list[dict]) -> int:
 
 def upsert_activity_metrics(session: Session, rows: list[dict]) -> int:
     return upsert(session, ActivityMetrics, rows, index_elements=["activity_id"])
+
+
+def upsert_hr_curve(session: Session, rows: list[dict]) -> int:
+    return upsert(session, ActivityHrCurve, rows, index_elements=["activity_id", "duration_s"])
+
+
+def upsert_hr_blocks(session: Session, rows: list[dict]) -> int:
+    return upsert(
+        session,
+        ActivityHrBlocks,
+        rows,
+        index_elements=["activity_id", "threshold_bpm", "bridge_tolerance_s"],
+    )
+
+
+def hr_computed_ids(session: Session, model, calc_version: int) -> set[str]:
+    """
+    Aktivity, které už mají řádky v současné verzi výpočtu.
+
+    Tohle je cache pro CLI: aktivita, která tu je, se nepřepočítává, pokud
+    nepřijde ``--force``. Řádky se starší ``calc_version`` se nezapočítávají,
+    takže bump verze vynutí přepočet sám od sebe.
+    """
+    stmt = select(model.activity_id).where(model.calc_version >= calc_version).distinct()
+    return {row[0] for row in session.execute(stmt).all()}
+
+
+def read_hr_curve(session: Session, wide: bool = False) -> pd.DataFrame:
+    """
+    Tepová křivka všech aktivit.
+
+    Args:
+        session: Otevřená session.
+        wide: ``True`` pivotuje na jeden řádek na aktivitu se sloupci
+            ``hr_curve_5s … hr_curve_3600s`` – v tomhle tvaru se křivka
+            připojuje k master CSV.
+    """
+    stmt = select(
+        ActivityHrCurve.activity_id, ActivityHrCurve.duration_s, ActivityHrCurve.max_mean_hr
+    ).order_by(ActivityHrCurve.activity_id, ActivityHrCurve.duration_s)
+    df = pd.DataFrame(session.execute(stmt).mappings().all())
+    if df.empty or not wide:
+        return df
+
+    df["max_mean_hr"] = df["max_mean_hr"].astype(float)
+    pivot = df.pivot(index="activity_id", columns="duration_s", values="max_mean_hr")
+    pivot.columns = [f"hr_curve_{int(c)}s" for c in pivot.columns]
+    return pivot.reset_index()
+
+
+def read_hr_blocks(session: Session) -> pd.DataFrame:
+    """Souvislé bloky nad prahem – dlouhý formát, jeden řádek na práh × toleranci."""
+    stmt = select(ActivityHrBlocks).order_by(
+        ActivityHrBlocks.activity_id,
+        ActivityHrBlocks.threshold_bpm,
+        ActivityHrBlocks.bridge_tolerance_s,
+    )
+    return pd.DataFrame(
+        [
+            {c.name: getattr(b, c.name) for c in ActivityHrBlocks.__table__.columns}
+            for b in session.scalars(stmt)
+        ]
+    )
+
+
+def read_hr_series(
+    session: Session, activity_ids: Sequence[str] | None = None
+) -> pd.DataFrame:
+    """
+    Tep všech (nebo vybraných) aktivit jedním dotazem.
+
+    Vteřinová data se tu čtou jinak než přes ``read_records``: bere se jen
+    ``timestamp`` a ``heart_rate`` a rovnou přes ``read_sql``, bez ORM. Pro
+    celou databázi je to 2,6 milionu řádků za ~5 sekund, kdežto stejná data
+    po aktivitách přes ORM trvají minuty. Předvýpočet křivky a bloků nad tím
+    pak běží v jednotkách sekund, takže nepotřebuje paralelizaci.
+    """
+    sql = (
+        "SELECT activity_id, timestamp, heart_rate FROM records "
+        "WHERE heart_rate IS NOT NULL"
+    )
+    params: dict[str, Any] = {}
+    if activity_ids is not None:
+        if not len(activity_ids):
+            return pd.DataFrame(columns=["activity_id", "timestamp", "heart_rate"])
+        sql += " AND activity_id = ANY(:ids)"
+        params["ids"] = list(activity_ids)
+
+    df = pd.read_sql(text(sql), session.connection(), params=params)
+    if not df.empty:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
 
 
 def read_activities(
@@ -459,6 +553,22 @@ def min_data_date(session: Session) -> date | None:
     b_min = session.scalar(select(DailyBiometrics.date).order_by(DailyBiometrics.date).limit(1))
     candidates = [d for d in (a_min, b_min) if d is not None]
     return min(candidates) if candidates else None
+
+
+def min_activity_date(session: Session) -> date | None:
+    """Datum nejstarší aktivity – počátek denní osy analytiky."""
+    return session.scalar(select(Activity.date).order_by(Activity.date).limit(1))
+
+
+def delete_daily_metrics_before(session: Session, cutoff: date) -> int:
+    """
+    Smaže denní metriky před počátkem osy.
+
+    Nutné po zúžení kalendáře: persist_daily_metrics jen upsertuje, takže
+    dny mimo novou osu by v tabulce zůstaly a export by je dál sypal do CSV.
+    """
+    result = session.execute(delete(DailyMetrics).where(DailyMetrics.date < cutoff))
+    return result.rowcount or 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -52,6 +52,8 @@ ACTIVITY_METRIC_COLUMNS = [
     "cardiac_drift", "max_hrr_60s", "durability_pct", "vam_m_per_h",
     "avg_gradient_pct", "climb_category", "aet_hr_dfa", "ant_hr_dfa",
     "aet_hr_proxy", "dfa_quality", "resp_rate_rsa", "epoc_score",
+    # Diagnostiku R-R plní src/physio/persist.py, ne tahle pipeline –
+    # v seznamu je proto není, aby ji přepočet metrik nepřepsal na NULL.
     "time_at_threshold_min", "tte_z4z5_min",
     "critical_hr", "tati_score", "fat_kcal", "carb_kcal", "fat_g",
     "carb_g", "fluid_loss_l", "heat_flag",
@@ -341,9 +343,20 @@ def compute_daily_metrics(session: Session, activities: pd.DataFrame) -> pd.Data
 
 
 def persist_daily_metrics(session: Session, daily: pd.DataFrame) -> int:
-    """Zapíše denní metriky (upsert po dnech)."""
+    """
+    Zapíše denní metriky (upsert po dnech).
+
+    `daily` vždy pokrývá celou osu z build_calendar, takže dny před jejím
+    začátkem jsou pozůstatek starší, širší osy – upsert by je nechal ležet
+    a export by je dál sypal do CSV.
+    """
     if daily.empty:
         return 0
+
+    cutoff = pd.to_datetime(daily.index.min()).date()
+    stale = repo.delete_daily_metrics_before(session, cutoff)
+    if stale:
+        log.info("Smazáno %d dní před začátkem osy (%s).", stale, cutoff)
 
     out = daily[[c for c in DAILY_METRIC_COLUMNS if c in daily.columns]].copy()
     out = out.reset_index().rename(columns={"index": "date"})
