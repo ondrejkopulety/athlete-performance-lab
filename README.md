@@ -9,6 +9,10 @@ strukturovaného kontextu pro AI trenéra.
 
 ## Rychlý start
 
+Tenhle soubor vysvětluje **proč** se věci počítají tak, jak se počítají.
+Kuchařka na každodenní provoz (co napsat do terminálu, co dělat, když
+něco spadne) je v [NAVOD.md](NAVOD.md).
+
 ```bash
 # 1. Závislosti
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -28,7 +32,13 @@ docker compose up -d db
 
 # 6. API
 .venv/bin/uvicorn src.api.app:app --reload   # http://localhost:8000/docs
+
+# 7. Dashboard
+cd frontend && npm install && npm run dev    # http://localhost:5173
 ```
+
+Nasazení na server (Docker + Traefik + Authentik) popisuje
+[docs/DEPLOY.md](docs/DEPLOY.md).
 
 ---
 
@@ -165,6 +175,7 @@ GET  /api/activities?from=&to=&sport=  seznam aktivit
 GET  /api/activities/{id}              detail včetně odvozených metrik
 GET  /api/activities/{id}/records?resolution=10s
                                        downsamplovaná vteřinová data
+GET  /api/dashboard                    kompletní podklad pro webový dashboard
 GET  /api/coach/context?date=          strukturovaný JSON pro LLM
 GET  /api/coach/history/{metric}?days= časová řada jedné metriky
 GET  /api/coach/glossary               význam a jednotky metrik
@@ -174,6 +185,15 @@ GET  /api/sync/status                  stav posledního běhu
 
 Vteřinová data se agregují přes TimescaleDB `time_bucket` — aktivita má
 desítky tisíc bodů a syrová data nemá smysl posílat do prohlížeče.
+
+`/api/dashboard` je jediný požadavek, který dělá webový dashboard: celá
+historie denních metrik ve sloupcovém tvaru (pole polí, ne objekty — 1650 dní
+krát 50 klíčů by byl zbytečně tučný payload), cyklistické aktivity s minutami
+v zónách, stoupáním a zotavovacím tepem, posledních pět jízd a dnešní
+biometrie. Navíc `last_known`: poslední den v kalendáři často ranní biometrii
+ještě nemá (Garmin ji doplní později), takže se k HRV, klidovému tepu a
+spánku posílá i poslední naměřená hodnota s datem — jinak by dashboard místo
+čísel ukazoval pomlčky.
 
 ### Kontext pro AI trenéra
 
@@ -205,6 +225,8 @@ platit plnou cenu jen za měnící se data.
 |---|---|
 | `activities` | Surová fakta z FIT — nikdy se nepřepočítávají |
 | `activity_metrics` | Odvozené metriky + `metrics_version` (přepočitatelné) |
+| `activity_hr_curve` | Tepová křivka — max. průměrný tep za 5 s až 60 min |
+| `activity_hr_blocks` | Souvislé bloky nad prahem — jak dlouho tep vydrží v kuse |
 | `records` | Vteřinová data, TimescaleDB hypertable (chunk 7 dní, komprese po 30) |
 | `daily_biometrics` | Denní vstupy z Garmin Connect (HRV, spánek, RHR, stres) |
 | `daily_metrics` | Výstup analytiky — jeden řádek na den |
@@ -212,6 +234,32 @@ platit plnou cenu jen za měnící se data.
 
 Oddělení surových a odvozených dat je to, co dělá inkrementalitu možnou:
 změna vzorce se projeví bumpnutím verze, aniž by se sáhlo na vstupy.
+
+### Tepová křivka a souvislé bloky
+
+Dvě metriky, které se z vteřinových dat nedají počítat za běhu, takže se
+předpočítávají:
+
+```bash
+python -m src.physio.cli hr              # co ještě nemá výsledky
+python -m src.physio.cli hr --force      # přepočítej všechno (~10 s / 800 aktivit)
+```
+
+**Ukládají se prahy, ne zóny.** Zóny se odvozují z LTHR, které se mění
+(172 → 177 → po terénním testu znovu). Kdyby v tabulce byly zóny, každá
+změna prahu by znamenala přepočet celé historie. Takhle je zóna lookup:
+„Z4 při LTHR 177" = práh 168 → nejbližší řádek na mřížce 135–185 po 5 bpm.
+Změna prahu mění dotaz, ne data. Tepová křivka je na LTHR nezávislá úplně.
+
+`activity_hr_blocks` odpovídá na otázku, kterou „čas v zónách" nezodpoví:
+131 minut nad prahem může být 272 úseků s mediánem 6 sekund, nebo sedm
+dvacetiminutových bloků. Ukládají se obě varianty přemostění vedle sebe
+(`bridge_tolerance_s` 0 a 15 s), protože rozdíl mezi nimi je sám o sobě
+informace o charakteru jízdy.
+
+Obojí teče do CSV standardním exportem: křivka rozvinutá do sloupců
+`hr_curve_*` v `master_high_res_summary.csv`, bloky v dlouhém formátu
+v `hr_blocks.csv`.
 
 ---
 
@@ -262,6 +310,7 @@ Biometrické sloupce naopak zůstávají `NULL`, dokud data z hodinek nedorazí.
 | `test_rhr_flag.py` | Vlajka klidového tepu relativně k baseline |
 | `test_lthr.py` | Odhad prahu z terénních dat vůči laktátovému testu |
 | `test_records_merge.py` | Slučování fragmentů vteřinových dat |
+| `test_api_dashboard.py` | Že `/api/dashboard` sedí na databázi a do jízd se nevloudí jiný sport |
 | `test_recovery_time.py` | Garmin recovery time: převod jednotek a hlavně to, že se předgarminská éra **nedopočítává** |
 
 Testy vyžadující databázi se automaticky přeskočí, pokud neběží.
@@ -290,6 +339,7 @@ src/
     pipeline.py           Orchestrace analytiky
   coach/context.py        Kontext pro LLM
   api/                    FastAPI (app, schemas, routers)
+frontend/                 Webový dashboard (React + Vite), viz frontend/README.md
   pipeline.py             Celý běh na jednom místě (sdílí CLI i API)
   analytics/exports.py    CSV exporty z databáze
 scripts/
@@ -306,7 +356,6 @@ data/
 
 ## Plánované
 
-- Frontend dashboard (Next.js + TypeScript; Recharts pro denní řady,
-  uPlot pro vteřinová data)
+- Detail jednotlivé jízdy v dashboardu (vteřinová data z `/api/activities/{id}/records`)
 - Napojení `/api/coach/context` na Claude API včetně tool use nad historií
 - Převod Apple Health a Strava importu do databáze

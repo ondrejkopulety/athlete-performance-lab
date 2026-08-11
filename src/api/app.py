@@ -26,7 +26,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from config.settings import API_CORS_ORIGINS, SYNC_CRON_HOUR  # noqa: E402
-from src.api.routers import activities, coach, daily, sync  # noqa: E402
+from src.api.routers import activities, coach, daily, dashboard, sync  # noqa: E402
 from src.api.schemas import HealthResponse  # noqa: E402
 from src.db.models import Activity, DailyMetrics  # noqa: E402
 from src.db.session import check_connection, get_session  # noqa: E402
@@ -92,6 +92,7 @@ app.add_middleware(
 )
 
 app.include_router(daily.router, prefix="/api")
+app.include_router(dashboard.router, prefix="/api")
 app.include_router(activities.router, prefix="/api")
 app.include_router(coach.router, prefix="/api")
 app.include_router(sync.router, prefix="/api")

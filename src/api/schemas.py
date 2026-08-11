@@ -147,6 +147,89 @@ class SyncStatusOut(BaseModel):
     last_run: dict[str, Any] | None = None
 
 
+# ── Dashboard ─────────────────────────────────────────────────────────────
+# Krátká jména polí (d, km, asc, …) jsou schválně: aktivit jsou stovky a
+# dlouhé klíče by v JSONu vážily víc než samotná data.
+
+
+class DashboardToday(BaseModel):
+    """Poslední den v kalendáři – to, co dashboard ukazuje nahoře."""
+    model_config = ConfigDict(from_attributes=True)
+
+    date: date
+    readiness_score: float | None = None
+    pure_recovery_score: float | None = None
+    hrv_last_night: float | None = None
+    hrv_weekly_avg: float | None = None
+    hrv_cv_pct: float | None = None
+    rhr_day: float | None = None
+    rhr_baseline_14d: float | None = None
+    rhr_elevation_bpm: float | None = None
+    sleep_duration_min: float | None = None
+    sleep_need_min: float | None = None
+    sleep_performance_pct: float | None = None
+    sleep_score_day: float | None = None
+    avg_stress_day: float | None = None
+    whoop_strain: float | None = None
+    strain: float | None = None
+    trimp: float | None = None
+    ctl: float | None = None
+    atl: float | None = None
+    tsb: float | None = None
+    acwr: float | None = None
+    recovery_time_h: float | None = None
+    garmin_readiness_score: float | None = None
+    illness_warning: bool | None = None
+    coach_advice: str | None = None
+
+
+class DashboardBiometric(BaseModel):
+    """Poslední naměřená hodnota a její reference (týdenní průměr, bazál,
+    potřeba spánku) z téhož dne."""
+
+    date: date
+    value: float | None = None
+    reference: float | None = None
+
+
+class DashboardRide(BaseModel):
+    id: str
+    d: date
+    dur: float | None = None      # minuty
+    km: float | None = None
+    avg: float | None = None      # tepová frekvence
+    max: float | None = None
+    asc: float | None = None      # převýšení v metrech
+    trimp: float | None = None
+    kcal: float | None = None
+    z: list[float]                # minuty v zónách Z1–Z5
+
+
+class DashboardActivity(BaseModel):
+    """Odlehčený řádek pro grafy zón, stoupání a zotavovacího tepu."""
+
+    id: str
+    d: date
+    z: list[float]
+    up: float | None = None       # minuty do kopce
+    asc: float | None = None
+    grad: float | None = None     # průměrný sklon stoupání v %
+    hrr: float | None = None      # max. pokles tepu za 60 s
+
+
+class DashboardOut(BaseModel):
+    generated_at: datetime
+    today: DashboardToday | None = None
+    last_known: dict[str, DashboardBiometric | None]
+    # [datum, ctl, atl, tsb, trimp, strain, readiness, acwr]
+    # Polarizace se nepošle: dashboard ji počítá z minut v zónách za zvolené
+    # období, ne z klouzavé denní metriky – jinak by nesouhlasila s obdobím
+    # zvoleným přepínačem.
+    days: list[list[Any]]
+    rides: list[DashboardRide]
+    activities: list[DashboardActivity]
+
+
 class SyncTriggerOut(BaseModel):
     accepted: bool
     message: str

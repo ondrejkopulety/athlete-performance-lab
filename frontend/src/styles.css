@@ -1,0 +1,87 @@
+/* Barvy a základ stránky – převzato 1:1 z designu (helmet blok
+   "Fitness Dashboard design/Readiness Dashboard.dc.html"). */
+
+:root {
+  --bg: #09090b;
+  --card: #0c0c0f;
+  --card2: #0e0e11;
+  --line: #17171a;
+  --line2: #1f1f23;
+  --track: #151518;
+  --fg: #fafafa;
+  --fg2: #e4e4e7;
+  --mut: #8b8b93;
+  --faint: #7a7a84;
+  --grey: #3f3f46;
+  --zero: #232327;
+  --ok: #a3e635;
+  --warn: #facc15;
+  --bad: #f43f5e;
+  --orange: #fb923c;
+  --blue: #38bdf8;
+  --blue2: #60a5fa;
+  --z1: #3f7a8c;
+}
+
+[data-theme="light"] {
+  --bg: #eeedea;
+  --card: #f7f6f4;
+  --card2: #f2f1ee;
+  --line: #dedcd6;
+  --line2: #d8d6cf;
+  --track: #e3e1db;
+  --fg: #33322f;
+  --fg2: #44433f;
+  --mut: #6f6d66;
+  --faint: #6f6d66;
+  --grey: #c4c2b9;
+  --zero: #dedcd4;
+  --ok: #5f8a2a;
+  --warn: #b07d1a;
+  --bad: #bf5a5a;
+  --orange: #c47238;
+  --blue: #4a83a6;
+  --blue2: #5b7fb5;
+  --z1: #9dc4d6;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.35s ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+a {
+  color: var(--ok);
+  text-decoration: none;
+}
+
+a:hover {
+  opacity: 0.8;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--ok) 28%, transparent);
+}
+
+/* V šabloně to řešil atribut style-hover; v Reactu jsou to dvě třídy. */
+.hover-fg {
+  transition: color 0.25s;
+}
+.hover-fg:hover {
+  color: var(--fg);
+}
+
+.hover-lift {
+  transition: border-color 0.25s, transform 0.25s;
+}
+.hover-lift:hover {
+  transform: translateY(-2px);
+}

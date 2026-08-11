@@ -1,0 +1,112 @@
+# ============================================================
+# Produkční stack: databáze + API + dashboard
+# ============================================================
+# Samostatný soubor, ne overlay nad docker-compose.yml – ten publikuje
+# Postgres na hostitele, což na veřejném serveru nechceme.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Předpokládá běžící Traefik a Authentik ve sdílené externí síti
+# (${TRAEFIK_NETWORK}). Na web se věší forward-auth middleware
+# ${AUTHENTIK_MIDDLEWARE}; API je dostupné jen skrz něj, protože ven
+# nevede žádný jiný router.
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: garmin_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-garmin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD musí být v .env}
+      POSTGRES_DB: ${POSTGRES_DB:-garmin}
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - garmin_pgdata:/var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=512MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-garmin} -d ${POSTGRES_DB:-garmin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - internal
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: garmin_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-garmin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-garmin}
+      GARMIN_EMAIL: ${GARMIN_EMAIL}
+      GARMIN_PASSWORD: ${GARMIN_PASSWORD}
+      GARMIN_DISPLAY_NAME: ${GARMIN_DISPLAY_NAME}
+      # garth si jinak ukládá tokeny do ~/.garth, mimo připojený volume
+      GARTH_HOME: /app/.garth
+      EXCLUDED_LOCATIONS: ${EXCLUDED_LOCATIONS:-}
+      # Noční sync přes APScheduler (viz lifespan v src/api/app.py).
+      SYNC_CRON_HOUR: ${SYNC_CRON_HOUR:-4}
+      # Frontend jde přes nginx na stejném originu, takže CORS je jen
+      # pojistka pro případ, že by se dashboard hostoval jinde.
+      API_CORS_ORIGINS: ${API_CORS_ORIGINS:-https://${DASHBOARD_HOST}}
+    volumes:
+      - garmin_data:/app/data
+      - garmin_logs:/app/logs
+      # Tokeny Garminu – bez nich si každý restart vyžádá nový login
+      # a Garmin na to reaguje rate limitem.
+      - garmin_garth:/app/.garth
+      - garmin_connect:/app/.garminconnect
+    networks:
+      - internal
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: garmin_web
+    restart: unless-stopped
+    depends_on:
+      - api
+    networks:
+      - internal
+      - proxy
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-proxy}
+      traefik.http.routers.garmin.rule: Host(`${DASHBOARD_HOST}`)
+      traefik.http.routers.garmin.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.garmin.tls: "true"
+      traefik.http.routers.garmin.tls.certresolver: ${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      traefik.http.routers.garmin.middlewares: ${AUTHENTIK_MIDDLEWARE:-authentik@file}
+      traefik.http.services.garmin.loadbalancer.server.port: "80"
+
+volumes:
+  garmin_pgdata:
+  garmin_data:
+  garmin_logs:
+  garmin_garth:
+  garmin_connect:
+
+networks:
+  internal:
+  proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK:-proxy}

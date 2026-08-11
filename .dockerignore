@@ -1,0 +1,17 @@
+.git
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+data
+logs
+reports
+tests
+docs
+frontend/node_modules
+frontend/dist
+.garth
+.garminconnect
+.env
+Fitness Dashboard design
