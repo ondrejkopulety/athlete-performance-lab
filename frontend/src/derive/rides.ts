@@ -25,6 +25,9 @@ export interface RideCard {
   tagBg: string;
   tagColor: string;
   zones: RideZone[];
+  /** Odznak se ukáže jen při neúplných datech – „100 % OK" štítek je šum. */
+  partial: boolean;
+  coverageNote: string | null;
 }
 
 export function buildRides(rides: Ride[], theme: Theme, light: boolean): RideCard[] {
@@ -53,6 +56,10 @@ export function buildRides(rides: Ride[], theme: Theme, light: boolean): RideCar
         name: ZONE_NAMES[i],
         mins: fmtMin(m),
       })),
+      // `cov === null` = pokrytí ještě spočítané není, což není totéž co
+      // špatné – karta v tom případě odznak nedostane.
+      partial: r.cov ? !r.cov.ok : false,
+      coverageNote: r.cov?.note ?? null,
     };
   });
 }

@@ -21,6 +21,12 @@ export interface Polarization {
   junkColor: string;
   junkW30: string;
   hasData: boolean;
+  /** Nezáměrná Z3 v procentech času ve všech zónách; null = bloky chybí. */
+  unintended: number | null;
+  unintendedW30: string;
+  unintendedColor: string;
+  unintendedTime: string;
+  unintendedShare: string;
 }
 
 export interface ZoneRow {
@@ -64,6 +70,21 @@ export function buildPolarization(
   const junk = pct(sum[2]);
   const high = pct(sum[3] + sum[4]);
 
+  // Nezáměrná Z3: čas v Z3 v úsecích kratších než tři minuty. Server ho
+  // počítá z předpočítaných bloků (čas nad prahem mínus čas v dlouhých
+  // blocích), tady se jen sčítá přes období.
+  //
+  // Aktivity bez spočítaných bloků se nezapočítají ani do jmenovatele –
+  // jinak by metrika klesala tím, že se něco nespočítalo.
+  const withBlocks = activities.filter((a) => a.z3u != null);
+  const unintendedMin = withBlocks.reduce((a, r) => a + (r.z3u as number) / 60, 0);
+  const blockTotal = withBlocks.reduce(
+    (a, r) => a + r.z.reduce((x, y) => x + (y || 0), 0),
+    0,
+  );
+  const unintended = blockTotal > 0 ? (unintendedMin / blockTotal) * 100 : null;
+  const z3Min = withBlocks.reduce((a, r) => a + (r.z[2] || 0), 0);
+
   return {
     low,
     junk,
@@ -75,6 +96,24 @@ export function buildPolarization(
     junkColor: junk <= 15 ? theme.ok : junk <= 22 ? theme.warn : theme.bad,
     junkW30: mounted ? `${Math.min(100, (junk / 30) * 100).toFixed(1)}%` : "0%",
     hasData: total > 0,
+    unintended,
+    unintendedW30:
+      mounted && unintended != null
+        ? `${Math.min(100, (unintended / 30) * 100).toFixed(1)}%`
+        : "0%",
+    unintendedColor:
+      unintended == null
+        ? theme.mut
+        : unintended <= 8
+          ? theme.ok
+          : unintended <= 15
+            ? theme.warn
+            : theme.bad,
+    unintendedTime: unintended == null ? "–" : fmtMin(unintendedMin),
+    unintendedShare:
+      unintended == null || z3Min <= 0
+        ? "bloky zatím nespočítané"
+        : `z ${fmtMin(z3Min)} v Z3 celkem`,
   };
 }
 

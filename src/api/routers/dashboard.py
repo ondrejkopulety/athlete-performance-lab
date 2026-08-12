@@ -18,14 +18,22 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from config.settings import (
+    HR_BLOCK_THRESHOLDS_BPM,
+    LTHR_DEFAULT_BPM,
+    Z3_BRIDGE_TOLERANCE_S,
+)
 from src.analytics.exports import CYCLING_SPORT_PATTERN
+from src.analytics.hr_panels import Coverage, unintentional_z3_s, zone_threshold_bpm
 from src.api.schemas import (
     DashboardActivity,
     DashboardBiometric,
     DashboardOut,
     DashboardRide,
     DashboardToday,
+    RideCoverage,
 )
+from src.db import repository as repo
 from src.db.models import Activity, ActivityMetrics, DailyMetrics
 from src.db.session import get_session
 
@@ -33,6 +41,14 @@ router = APIRouter(tags=["dashboard"])
 
 # Kolik posledních jízd se vypisuje v seznamu pod grafy.
 RIDES_LIMIT = 5
+
+
+def _coverage(raw: dict | None) -> RideCoverage | None:
+    """Pokrytí jízdy jako verdikt. ``None`` = ještě nespočítané, což není
+    totéž co špatné – karta pak nedostane odznak ani vysvětlení."""
+    if raw is None:
+        return None
+    return RideCoverage(**Coverage(**raw).as_dict())
 
 
 def _num(value: float | None, default: float | None = None) -> float | None:
@@ -131,6 +147,29 @@ def dashboard(session: Session = Depends(get_session)) -> DashboardOut:
         .order_by(Activity.date, Activity.activity_id)
     ).all()
 
+    # ── Pokrytí a nezáměrná Z3 ────────────────────────────────────────────
+    # Obojí stojí na předpočítaných tabulkách; tady se jen překládá.
+    coverage = repo.read_hr_coverage(session)
+
+    # Nezáměrná Z3 = čas v Z3 mimo souvislé bloky. Hranice Z3 se odvodí
+    # z LTHR lookupem na mřížku prahů – dvě čísla do dotazu, nic k přepočtu.
+    threshold_state = repo.read_current_threshold(session)
+    lthr = int(threshold_state["lthr_bpm"]) if threshold_state else LTHR_DEFAULT_BPM
+    z3_lo = zone_threshold_bpm(lthr, "Z3", HR_BLOCK_THRESHOLDS_BPM)
+    z3_hi = zone_threshold_bpm(lthr, "Z4", HR_BLOCK_THRESHOLDS_BPM)
+    blocks = repo.read_block_totals(session, [z3_lo, z3_hi], Z3_BRIDGE_TOLERANCE_S)
+
+    def _z3_unintentional(activity_id: str) -> int | None:
+        per_threshold = blocks.get(activity_id)
+        if not per_threshold:
+            return None       # bloky ještě spočítané nejsou – to není nula
+        return unintentional_z3_s(
+            {t: v["total_s"] for t, v in per_threshold.items()},
+            {t: v["long_s"] for t, v in per_threshold.items()},
+            z3_lo,
+            z3_hi,
+        )
+
     activities = [
         DashboardActivity(
             id=r.activity_id,
@@ -146,6 +185,8 @@ def dashboard(session: Session = Depends(get_session)) -> DashboardOut:
             asc=_num(r.ascent_m),
             grad=_num(r.avg_gradient_pct),
             hrr=_num(r.max_hrr_60s),
+            z3u=_z3_unintentional(r.activity_id),
+            cov=_coverage(coverage.get(r.activity_id)),
         )
         for r in act_rows
     ]
@@ -168,6 +209,7 @@ def dashboard(session: Session = Depends(get_session)) -> DashboardOut:
                 _zero(r.time_in_z4),
                 _zero(r.time_in_z5),
             ],
+            cov=_coverage(coverage.get(r.activity_id)),
         )
         for r in reversed(act_rows[-RIDES_LIMIT:])
     ]

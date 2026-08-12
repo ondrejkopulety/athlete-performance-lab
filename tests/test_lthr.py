@@ -59,6 +59,41 @@ def test_empty_input_is_safe():
     assert compute_best_hr_windows(pd.DataFrame(), [20])["best_20min_hr"] is None
 
 
+# ── Jedno jádro pro jednu metriku ──────────────────────────────────────────
+# best_20min_hr v activity_metrics a řádek 1200 s v activity_hr_curve jsou
+# totéž číslo. Dřív nebyly: activity.py toleroval 10% díru v okně
+# (min_periods 0,9), takže průměr z 18 minut vystupoval jako dvacetiminutové
+# maximum. Nad reálnými daty se to týkalo 139 aktivit, medián nadhodnocení
+# 2,2 bpm, nejhorší případ 28,4 bpm.
+
+
+def test_matches_stored_curve_core():
+    """Adaptér musí vracet přesně to, co jádro tepové křivky."""
+    from src.physio.hr_curve import max_mean_curve
+    from src.physio.hr_stream import to_second_grid
+
+    rec = _records([(130, 25), (176, 22), (140, 25)])
+    grid = to_second_grid(rec["timestamp"].to_numpy(), rec["heart_rate"].to_numpy(float))
+    curve = max_mean_curve(grid, [1200])
+
+    assert compute_best_hr_windows(rec, [20])["best_20min_hr"] == curve[1200]
+
+
+def test_gap_inside_window_yields_nothing_not_an_average():
+    """
+    Okno s dírou nesmí dát hodnotu. Osmnáct minut dat prezentovaných jako
+    dvacetiminutové maximum je horší než chybějící číslo – tváří se
+    srovnatelně s okny, která pokrytá jsou.
+    """
+    hard = _records([(175, 9)])
+    later = _records([(175, 9)])
+    # dvě devítiminutová úsilí oddělená dvouminutovou dírou v záznamu
+    later["timestamp"] = later["timestamp"] + pd.Timedelta(minutes=11)
+    gapped = pd.concat([hard, later], ignore_index=True)
+
+    assert compute_best_hr_windows(gapped, [20])["best_20min_hr"] is None
+
+
 def test_window_is_long_enough_to_catch_a_hard_effort():
     """
     Odhad je dolní mez – potřebuje, aby v okně opravdu proběhlo maximální

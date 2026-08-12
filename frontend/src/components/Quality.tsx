@@ -95,15 +95,19 @@ export function Quality({
           <p style={NOTE}>Čas ve striktní Z1–Z2 — základ vytrvalosti.</p>
         </div>
 
-        {/* ── Junk miles ─────────────────────────────────────────────── */}
+        {/* ── Nezáměrná Z3 ───────────────────────────────────────────────
+            Dřív "Junk miles · Z3" = veškerý čas v Z3. Jenže Z3 v souvislém
+            bloku je sweet spot trénink, ne odpad; odpad je Z3, do které se
+            spadne kvůli kopci. Teď se počítá jen čas v Z3 v úsecích kratších
+            než tři minuty. */}
         <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 2 }}>
-          <span style={CARD_LABEL}>Junk miles · Z3</span>
+          <span style={CARD_LABEL}>Nezáměrná Z3</span>
           <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}>
-            <span style={mono(30, { lineHeight: 1, color: polarization.junkColor })}>
-              {polarization.hasData ? pct(polarization.junk) : "–"}
+            <span style={mono(30, { lineHeight: 1, color: polarization.unintendedColor })}>
+              {polarization.unintended == null ? "–" : pct(polarization.unintended)}
             </span>
             <span style={mono(13, { color: "var(--faint)" })}>%</span>
-            <span style={mono(10, { marginLeft: "auto", color: "var(--mut)" })}>cíl ≤ 15 %</span>
+            <span style={mono(10, { marginLeft: "auto", color: "var(--mut)" })}>cíl ≤ 8 %</span>
           </div>
           <div
             style={{
@@ -117,9 +121,9 @@ export function Quality({
             <div
               style={{
                 height: "100%",
-                width: polarization.junkW30,
+                width: polarization.unintendedW30,
                 borderRadius: 99,
-                background: polarization.junkColor,
+                background: polarization.unintendedColor,
                 transition: "width .8s cubic-bezier(.22,1,.36,1)",
               }}
             />
@@ -127,14 +131,21 @@ export function Quality({
               style={{
                 position: "absolute",
                 top: -4,
-                left: "50%",
+                left: "27%",
                 width: 1.5,
                 height: 15,
                 background: "var(--faint)",
               }}
             />
           </div>
-          <p style={NOTE}>Šedá zóna — moc těžké na regeneraci, moc lehké na rychlost.</p>
+          <div style={mono(10.5, { display: "flex", justifyContent: "space-between", gap: 8 })}>
+            <span style={{ color: "var(--fg2)" }}>{polarization.unintendedTime}</span>
+            <span style={{ color: "var(--faint)" }}>{polarization.unintendedShare}</span>
+          </div>
+          <p style={NOTE}>
+            Čas v Z3 v úsecích kratších než tři minuty — šedá zóna, do které se spadne
+            kvůli kopci. Souvislá Z3 je sweet spot trénink a nepočítá se sem.
+          </p>
         </div>
 
         {/* ── Tepová regenerace ──────────────────────────────────────── */}

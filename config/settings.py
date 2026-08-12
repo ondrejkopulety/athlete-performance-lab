@@ -314,17 +314,35 @@ LTHR_BEST_WINDOWS_MIN  = [20, 30, 60]  # která okna počítat per-activity
 # odvozují z LTHR, které se mění (172 → 177 → po terénním testu znovu) a
 # uložené zóny by znamenaly přepočet celé historie při každé změně. Takhle
 # je zóna jen lookup: "Z4 při LTHR 177" = práh 168 → nejbližší řádek.
-HR_GRID_FFILL_LIMIT_S = 5      # jak dlouhou díru v tepu ještě dopnout ffillem
-
-# Pod tímhle pokrytím se aktivita v reportu označí varováním. Nepočítá se
-# z ní nic jiného než u ostatních – jen je vidět, že čísla stojí na polovině
-# dat. Jízda 12. 7. 2026 má pokrytí 54 % (403 min rozsahu, jedna díra 56 min),
-# jízda 11. 4. 2026 má 59 % kvůli 26minutovému výpadku tepu uprostřed jízdy.
+# Jak dlouhou díru v tepu ještě doplnit poslední známou hodnotou.
 #
-# Pokrytí se měří AŽ PO doplnění mezer, ne na hustotě vzorků: 305 z 799
-# aktivit má Smart Recording se vzorkem po 5 s, tedy hustotu kolem 20 % při
-# plné použitelnosti mřížky. Kdyby varování viselo na hustotě, křičelo by
-# u 588 aktivit a skutečné výpadky by v tom zapadly.
+# 15 s, ne 5: Smart Recording zapisuje vzorek zhruba po pěti sekundách, ale
+# krok se drží přesně na hraně limitu a občas ji přeskočí. Nad celou
+# databází je 108 929 děr dlouhých 6–10 s a tvoří 17,8 % veškerého
+# chybějícího času. Při limitu 5 s je tak většina jízd se Smart Recording
+# formálně děravá: dvacetiminutové okno křivky vyšlo jen u 315 z 799 aktivit
+# a hodinové u 70.
+#
+# Zvednutí na 15 s hodnoty nemění (medián rozdílu tam, kde okno vyjde při
+# obou limitech, je 0,00 bpm) – jen přestane zahazovat okna, která reálně
+# naměřená jsou: 20min okno u 668 aktivit, hodinové u 216. Medián pokrytí
+# stoupne z 85,6 na 96,2 %.
+#
+# Výš se nejde schválně: půlka chybějícího času jsou díry delší než 20 minut
+# (skutečná autopauza) a po půl minutě bez záznamu už poslední naměřený tep
+# netvrdí nic o tom, co se dělo.
+HR_GRID_FFILL_LIMIT_S = 15
+
+# Pod tímhle pokrytím dostane jízda v dashboardu odznak "částečná data" a
+# vypadne z trendů, dokud se filtr nevypne. Nepočítá se z ní nic jiného než
+# u ostatních – jen je vidět, že čísla stojí na části dat. Jízda 12. 7. 2026
+# má pokrytí 55 % (403 min rozsahu, jedna díra 56 min), jízda 11. 4. 2026
+# má 59 % kvůli 26minutovému výpadku tepu uprostřed jízdy.
+#
+# Pokrytí se měří AŽ PO doplnění mezer, ne na hustotě vzorků: 341 z 799
+# aktivit má Smart Recording, tedy hustotu kolem 40 % při plné použitelnosti
+# mřížky. Kdyby varování viselo na hustotě, křičelo by u většiny databáze
+# a skutečné výpadky by v tom zapadly.
 HR_COVERAGE_WARN_PCT = 80.0
 
 # Tepová křivka – maximální průměrný tep za dané okno. Na LTHR nezávislá
@@ -349,15 +367,63 @@ HR_BLOCK_BRIDGE_TOLERANCES_S = [0, 15]
 # přes sjezd spojí dvě opravdu oddělená úsilí a metrika ztratí smysl.
 HR_BLOCK_BRIDGE_MAX_DROP_BPM = 5
 # Délka, nad kterou se úsek počítá jako "dlouhý" (time_in_long_blocks_s).
+# Zároveň hranice mezi záměrnou a nezáměrnou Z3 – viz Z3_INTENTIONAL_MIN_S.
 HR_BLOCK_LONG_S = 180
+
+# Koše histogramu délek úseků. Horní hranice v sekundách, poslední koš je
+# všechno nad ní. Ukládají se předpočítané v activity_hr_blocks, protože
+# rozdělení délek se z uložených souhrnů (počet úseků, medián) sestavit nedá
+# a dopočítávat ho za běhu ze sekundových dat by znamenalo číst records.
+#
+# Počet úseků i součet jejich času dohromady: 199 úseků pod 30 s vypadá
+# jinak než 18 minut, které dohromady dají, a obě čísla jsou důležitá.
+HR_SEGMENT_BUCKETS_S = [30, 60, 120, 180, 300]   # + poslední koš "> 300 s"
+HR_SEGMENT_BUCKET_LABELS = ["<30 s", "30–60 s", "1–2 min", "2–3 min", "3–5 min", ">5 min"]
+
+# ── Zóna jako lookup nad mřížkou prahů ────────────────────────────────────
+# Bloky jsou uložené na absolutních prazích, zóna se odvozuje až při
+# zobrazení: hranice zóny se spočítá z LTHR a zaokrouhlí na nejbližší práh
+# mřížky. Nic se tím nepřepočítává, jen se mění, na který řádek se sáhne.
+#
+# Podíly jsou odvozené z MĚŘENÝCH zón (ZONES nahoře) vůči jejich vlastní
+# hranici Z3/Z4, která je 172 bpm: 137/172, 156/172, 172/172, 184/172.
+# Díky tomu má "Z4" v panelu bloků stejný význam jako Z4 ve zbytku
+# dashboardu. Rozšířená konvence, kde práh Z4 leží na 0,95 × LTHR, by pro
+# LTHR 178 dala 170 místo 180 – ale taky dvě různé Z4 na jedné obrazovce.
+# Kdyby se zóny někdy přeměřily, mění se ZONES i tahle tabulka spolu.
+HR_ZONE_LTHR_RATIO = {"Z2": 0.796, "Z3": 0.907, "Z4": 1.000, "Z5": 1.070}
+
+# LTHR, kolem kterého je postavená měřená tabulka ZONES – jmenovatel podílů
+# výš. Slouží jako výchozí hodnota editovatelného prahu, dokud si uživatel
+# nenastaví vlastní.
+LTHR_DEFAULT_BPM = ZONES["Z4"][0]
+
+# Zóna, jejíž práh je hlavním číslem panelu souvislých bloků.
+HR_BLOCK_PRIMARY_ZONE = "Z4"
+
+# Nezáměrná Z3: čas v Z3 strávený v úsecích kratších než HR_BLOCK_LONG_S.
+# Z3 v souvislém bloku je sweet spot trénink, ne odpad; odpad je Z3, do
+# které se spadne kvůli kopci. Počítá se rozdílem dvou prahů z mřížky
+# (dolní a horní hranice Z3), viz src/analytics/hr_panels.py.
+Z3_INTENTIONAL_MIN_S = HR_BLOCK_LONG_S
+# Tolerance přemostění, ze které nezáměrná Z3 čte. Musí být v
+# HR_BLOCK_BRIDGE_TOLERANCES_S; 15 s odpovídá výchozímu stavu panelu bloků.
+Z3_BRIDGE_TOLERANCE_S = 15
+
+# Po kolika dnech je nastavený práh označený za zastaralý. Celý obsah
+# dashboardu (zóny, polarizace, nezáměrná Z3, prahy bloků) visí na jednom
+# čísle, které tiše stárne.
+THRESHOLD_STALE_DAYS = 90
 
 # Verze výpočtu → sloupec calc_version. Bumpni při každé změně pravidel
 # (vyhlazení, přemostění, příprava streamu), ať je z dat poznat, která
 # čísla vznikla jakou logikou.
 #   1 = první verze: 1 Hz mřížka, ffill 5 s, vyhlazení 10 s, přemostění
 #       s podmínkou na hloubku propadu
-HR_CURVE_VERSION: int = 1
-HR_BLOCKS_VERSION: int = 1
+#   2 = ffill 15 s místo 5 s (viz HR_GRID_FFILL_LIMIT_S); u bloků navíc
+#       histogram délek úseků
+HR_CURVE_VERSION: int = 2
+HR_BLOCKS_VERSION: int = 2
 
 # Kolik dní historie načíst před prvním "dirty" dnem, aby rolling okna
 # (monotony 7d, ACWR 7/28d, polarizace 14d, HRV z-score 30d, strain kvantil 30d)
@@ -629,6 +695,26 @@ METRIC_META: dict[str, dict] = {
                 "131 minut nad prahem může být 272 úseků s mediánem 6 s. Ukládá se na "
                 f"mřížce absolutních prahů {HR_BLOCK_THRESHOLDS_BPM[0]}–"
                 f"{HR_BLOCK_THRESHOLDS_BPM[-1]} bpm, zóna je až lookup podle LTHR. "
-                f"Dvě varianty přemostění: {HR_BLOCK_BRIDGE_TOLERANCES_S} s.",
+                f"Dvě varianty přemostění: {HR_BLOCK_BRIDGE_TOLERANCES_S} s. "
+                "Nese i rozdělení délek úseků po koších "
+                f"({', '.join(HR_SEGMENT_BUCKET_LABELS)}), počty i součty času.",
+    },
+    "hr_coverage": {
+        "unit": "%", "direction": "higher_is_better",
+        "note": "Na jak úplných datech křivka a bloky stojí (activity_hr_coverage). "
+                f"Pod {HR_COVERAGE_WARN_PCT:.0f} % pokrytí po doplnění mezer jsou "
+                "metriky souvislých bloků podhodnocené (blok ukončí pauza, ne "
+                "fyziologie) a delší okna křivky nevzniknou. Hustota vzorků je "
+                "informativní – řídký zápis Smart Recordingu data neztrácí.",
+        "bands": {f">= {HR_COVERAGE_WARN_PCT:.0f}": "ok",
+                  f"< {HR_COVERAGE_WARN_PCT:.0f}": "částečná data"},
+    },
+    "z3_unintentional": {
+        "unit": "s", "direction": "lower_is_better",
+        "note": "Nezáměrná Z3: čas v Z3 strávený v úsecích kratších než "
+                f"{HR_BLOCK_LONG_S} s. Odvozuje se z activity_hr_blocks rozdílem "
+                "dvou prahů (spodní hranice Z3 a Z4). Z3 v souvislém bloku je sweet "
+                "spot trénink, ne odpad – odpad je Z3, do které se spadne kvůli "
+                "kopci. Liší se tím od z3_junk_pct, který počítá veškerý čas v Z3.",
     },
 }

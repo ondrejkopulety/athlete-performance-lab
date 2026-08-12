@@ -1,6 +1,6 @@
 import type { RideCard } from "../derive/rides";
 import type { Theme } from "../theme";
-import { CARD, mono, SECTION_LABEL } from "./ui";
+import { CARD, mono, NOTE, SECTION_LABEL } from "./ui";
 
 export function Rides({
   rides,
@@ -57,15 +57,35 @@ export function Rides({
                 >
                   {r.date}
                 </span>
-                <span
-                  style={mono(10, {
-                    padding: "3px 8px",
-                    borderRadius: 99,
-                    background: r.tagBg,
-                    color: r.tagColor,
-                  })}
-                >
-                  {r.tag}
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  {/* Odznak jen při neúplných datech. Zelený "100 % OK"
+                      štítek u zbytku by byl šum – ticho znamená v pořádku. */}
+                  {r.partial && (
+                    <span
+                      title="Tep chybí na části záznamu – rozbal kartu pro detail"
+                      style={mono(9.5, {
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                        padding: "3px 7px",
+                        borderRadius: 99,
+                        border: `1px solid ${theme.line}`,
+                        color: theme.mut,
+                      })}
+                    >
+                      ◔ částečná data
+                    </span>
+                  )}
+                  <span
+                    style={mono(10, {
+                      padding: "3px 8px",
+                      borderRadius: 99,
+                      background: r.tagBg,
+                      color: r.tagColor,
+                    })}
+                  >
+                    {r.tag}
+                  </span>
                 </span>
               </div>
 
@@ -135,6 +155,18 @@ export function Rides({
                     <span>Max HR {r.maxHr}</span>
                     <span>{r.kcal} kcal</span>
                   </div>
+                  {r.coverageNote && (
+                    <p
+                      style={{
+                        ...NOTE,
+                        marginTop: 2,
+                        paddingTop: 9,
+                        borderTop: "1px solid var(--line2)",
+                      }}
+                    >
+                      {r.coverageNote}
+                    </p>
+                  )}
                 </div>
               )}
             </div>

@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.physio.hr_blocks import find_segments, summarize_segments
+from src.physio.hr_blocks import find_segments, segment_histogram, summarize_segments
 from src.physio.hr_curve import max_mean_curve
 from src.physio.hr_stream import to_second_grid
 
@@ -329,3 +329,53 @@ def test_mrizka_z_datetime64():
     grid = to_second_grid(ts, hr)
 
     assert grid.tolist() == [170.0, 171.0, 171.0, 173.0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Histogram délek úseků
+# ═══════════════════════════════════════════════════════════════════════════
+# Ukládá se předpočítaný, protože z uložených souhrnů (počet úseků, medián)
+# se rozdělení sestavit nedá a dopočítat by znamenalo znovu číst records.
+
+BUCKETS = [30, 60, 120, 180, 300]
+
+
+def test_histogram_radi_delky_do_kosu():
+    lengths = np.array([10, 29, 45, 90, 150, 240, 600])
+
+    counts, seconds = segment_histogram(lengths, BUCKETS)
+
+    assert counts == [2, 1, 1, 1, 1, 1]
+    assert seconds == [39, 45, 90, 150, 240, 600]
+    assert sum(counts) == lengths.size
+    assert sum(seconds) == int(lengths.sum())
+
+
+def test_hranice_kose_patri_do_nizsiho():
+    """Úsek dlouhý přesně 30 s je "<30 s", ne "30–60 s"."""
+    counts, _ = segment_histogram(np.array([30, 60, 180]), BUCKETS)
+    assert counts == [1, 1, 0, 1, 0, 0]
+
+
+def test_histogram_bez_useku_je_samá_nula():
+    """Nula úseků je platná odpověď, ne chybějící údaj."""
+    counts, seconds = segment_histogram(np.empty(0, dtype=np.int64), BUCKETS)
+    assert counts == [0] * 6
+    assert seconds == [0] * 6
+
+
+def test_souhrn_nese_histogram_ktery_sedi_na_useky():
+    hr = np.concatenate([
+        np.full(20, 175.0), np.full(60, 150.0),      # 20 s
+        np.full(250, 175.0), np.full(60, 150.0),     # 250 s
+        np.full(400, 175.0),                          # 400 s
+    ])
+
+    summary = summarize_segments(find_segments(hr, THRESHOLD), 180, BUCKETS)
+
+    assert summary.segment_count == 3
+    assert sum(summary.hist_counts) == summary.segment_count
+    assert sum(summary.hist_seconds) == summary.total_time_s
+    assert summary.hist_counts[0] == 1       # 20 s → "<30 s"
+    assert summary.hist_counts[4] == 1       # 250 s → "3–5 min"
+    assert summary.hist_counts[5] == 1       # 400 s → ">5 min"

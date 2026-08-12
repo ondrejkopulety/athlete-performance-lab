@@ -31,6 +31,7 @@ import pandas as pd
 
 from config.settings import (
     DFA_AET_THRESHOLD,
+    HR_GRID_FFILL_LIMIT_S,
     LTHR_BEST_WINDOWS_MIN,
     TRIMP_K1,
     TRIMP_K2,
@@ -47,6 +48,8 @@ from config.settings import (
     WARMUP_SECONDS,
     ZONES as ATHLETE_ZONES,
 )
+from src.physio.hr_curve import max_mean_curve
+from src.physio.hr_stream import to_second_grid
 from src.physio.quality import assess_rr_authenticity
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -817,34 +820,35 @@ def compute_best_hr_windows(
 
     Na rozdíl od DFA-alpha1 funguje nad každou aktivitou s tepem, ne jen
     nad těmi s hrudním pásem, a nevyžaduje beat-to-beat data.
+
+    Počítá to ``src.physio.hr_curve`` – totéž jádro, které plní tabulku
+    ``activity_hr_curve``. Tahle funkce je jen adaptér z DataFrame na
+    sloupce ``best_20min_hr`` … a existuje proto, že analytika běží dřív
+    než předvýpočet křivky, takže se na uložené řádky spolehnout nemůže.
+
+    Dřív tu bylo vlastní počítání s ``min_periods = 0.9 × okno`` nad
+    interpolací do 30 s. To znamenalo, že se průměr z 18 minut dat vydával
+    za dvacetiminutové maximum – a proti uložené křivce, která vyžaduje
+    plné pokrytí, vycházelo na stejnou aktivitu jiné číslo. Jedna metrika,
+    jedno jádro: okno bez plného pokrytí nevznikne.
     """
     windows_min = windows_min or LTHR_BEST_WINDOWS_MIN
     out: dict = {f"best_{m}min_hr": None for m in windows_min}
 
-    if tdata.empty or "heart_rate" not in tdata.columns:
+    if tdata.empty or not {"timestamp", "heart_rate"} <= set(tdata.columns):
         return out
 
-    hr = tdata[["timestamp", "heart_rate"]].dropna(subset=["heart_rate"])
-    if len(hr) < 60:
-        return out
-
-    series = (
-        hr.set_index("timestamp")
-        .sort_index()["heart_rate"]
-        .resample("1s")
-        .mean()
-        .interpolate(method="time", limit=30)
+    grid = to_second_grid(
+        tdata["timestamp"].to_numpy(),
+        pd.to_numeric(tdata["heart_rate"], errors="coerce").to_numpy(dtype=float),
+        ffill_limit_s=HR_GRID_FFILL_LIMIT_S,
     )
+    curve = max_mean_curve(grid, [m * 60 for m in windows_min])
 
     for m in windows_min:
-        w = m * 60
-        if len(series) < w:
-            continue
-        # min_periods 90 %: krátká díra v záznamu nesmí okno zahodit,
-        # ale ani se nesmí počítat průměr z poloviny dat.
-        best = series.rolling(w, min_periods=int(w * 0.9)).mean().max()
-        if pd.notna(best):
-            out[f"best_{m}min_hr"] = round(float(best), 1)
+        value = curve.get(m * 60)
+        if value is not None:
+            out[f"best_{m}min_hr"] = value
     return out
 
 

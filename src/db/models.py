@@ -8,6 +8,8 @@ Návrhový princip: **surová fakta jsou oddělená od odvozených metrik.**
   activity_metrics  – co jsme spočítali; nese metrics_version → přepočitatelné
   activity_hr_curve – tepová křivka (max. průměr za okno); nese calc_version
   activity_hr_blocks– souvislé bloky nad prahem; nese calc_version
+  activity_hr_coverage – na jak úplných datech obojí stojí; nese calc_version
+  athlete_threshold – historie nastavení LTHR a maximálního tepu
   records           – vteřinová data (TimescaleDB hypertable)
   daily_biometrics  – denní vstupy z Garmin Connect API (HRV, spánek, RHR, stres)
   daily_metrics     – denní výstup analytiky (dřívější athlete_readiness.csv)
@@ -277,8 +279,77 @@ class ActivityHrBlocks(Base):
     segment_count: Mapped[int] = mapped_column(Integer, nullable=False)
     median_segment_s: Mapped[float | None] = mapped_column(Numeric(6, 1))
 
+    # Rozdělení délek úseků po koších (settings.HR_SEGMENT_BUCKETS_S).
+    # Počty i součty sekund, protože každé říká něco jiného: 199 úseků pod
+    # 30 s vypadá jinak než 18 minut, které dohromady dají.
+    segment_hist_counts: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, server_default="{}"
+    )
+    segment_hist_seconds: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, server_default="{}"
+    )
+
     calc_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, index=True)
     computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ActivityHrCoverage(Base):
+    """
+    Na jak úplných datech stojí křivka a bloky téhle jízdy.
+
+    Ukládají se sekundy, ne procenta: procenta jsou podíl dvou uložených
+    čísel, kdežto z procent se rozsah zpátky nedostane – a rozdíl mezi
+    "80 % z hodiny" a "80 % ze čtyř hodin" je pro důvěru v číslo podstatný.
+
+    Dvě různá pokrytí vedle sebe schválně (viz hr_batch.ActivityCoverage):
+    ``measured_s`` je hustota zápisu, ``usable_s`` je použitelnost mřížky po
+    doplnění mezer. Varování visí výhradně na druhém – řídký zápis Smart
+    Recordingu není ztráta dat.
+    """
+
+    __tablename__ = "activity_hr_coverage"
+
+    activity_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("activities.activity_id", ondelete="CASCADE"), primary_key=True
+    )
+
+    span_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    measured_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    usable_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    longest_gap_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Nejdelší okno, které jízdě v tepové křivce vyšlo; None = žádné.
+    max_curve_duration_s: Mapped[int | None] = mapped_column(Integer)
+
+    calc_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, index=True)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AthleteThreshold(Base):
+    """
+    Historie nastavení prahového a maximálního tepu.
+
+    Historie, ne jeden přepisovaný řádek: dashboard ukazuje "nastaveno před
+    N dny" a to N musí být z něčeho měřitelného. Zóny se odsud neodvozují –
+    ZONES v settings.py jsou měřené z laktátového testu a mají přednost.
+    LTHR řídí jen lookup prahu v panelu souvislých bloků, takže jeho změna
+    nikdy nespustí přepočet uložených dat.
+    """
+
+    __tablename__ = "athlete_threshold"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    lthr_bpm: Mapped[int] = mapped_column(Integer, nullable=False)
+    hr_max_bpm: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Odkdy hodnota platí – typicky datum testu, ne datum zápisu.
+    valid_from: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    note: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 

@@ -35,6 +35,7 @@ from config.settings import (
     HR_CURVE_DURATIONS_S,
     HR_CURVE_VERSION,
     HR_GRID_FFILL_LIMIT_S,
+    HR_SEGMENT_BUCKETS_S,
 )
 from src.physio.hr_blocks import block_rows
 from src.physio.hr_curve import curve_rows
@@ -48,12 +49,12 @@ class ActivityCoverage:
     """
     Kolik z rozsahu aktivity stojí na datech – ve dvou různých smyslech.
 
-    Rozlišit je potřeba, protože Smart Recording zapisuje vzorek jednou za
-    5 sekund a 305 z 799 aktivit v databázi ho má. Taková jízda má hustotu
-    vzorků kolem 20 %, ale po doplnění mezer (ffill do 5 s) je její mřížka
-    plná a všechna okna z ní vycházejí normálně. Kdyby varování viselo na
-    hustotě vzorků, křičelo by u 588 aktivit a skutečné výpadky by se v tom
-    ztratily.
+    Rozlišit je potřeba, protože Smart Recording zapisuje vzorek zhruba
+    jednou za 5 sekund a 341 z 799 aktivit v databázi ho má. Taková jízda má
+    hustotu vzorků kolem 40 %, ale po doplnění mezer (ffill do
+    ``HR_GRID_FFILL_LIMIT_S``) je její mřížka plná a všechna okna z ní
+    vycházejí normálně. Kdyby varování viselo na hustotě vzorků, křičelo by
+    u většiny databáze a skutečné výpadky by se v tom ztratily.
 
       sample_density_pct  podíl skutečně naměřených vzorků – nízká hodnota
                           při plném pokrytí znamená Smart Recording, ne
@@ -69,6 +70,9 @@ class ActivityCoverage:
     span_s: int
     longest_gap_s: int
     curve_windows: int
+    # Nejdelší okno, které jízdě v křivce vyšlo; None = žádné. Drží se tu,
+    # aby věta "křivka nemá okna delší než 45 min" nestála na druhém dotazu.
+    max_curve_duration_s: int | None = None
 
     @property
     def coverage_pct(self) -> float:
@@ -77,6 +81,19 @@ class ActivityCoverage:
     @property
     def sample_density_pct(self) -> float:
         return 100.0 * self.measured_s / self.span_s if self.span_s else 0.0
+
+    def to_row(self, calc_version: int) -> dict:
+        """Řádek pro ``activity_hr_coverage``. Procenta se neukládají – jsou
+        podíl dvou uložených čísel, kdežto rozsah se z procent nedopočítá."""
+        return {
+            "activity_id": self.activity_id,
+            "span_s": self.span_s,
+            "measured_s": self.measured_s,
+            "usable_s": self.usable_s,
+            "longest_gap_s": self.longest_gap_s,
+            "max_curve_duration_s": self.max_curve_duration_s,
+            "calc_version": calc_version,
+        }
 
 
 @dataclass
@@ -136,6 +153,7 @@ def compute_activity(
         long_block_s=HR_BLOCK_LONG_S,
         smooth_s=HR_BLOCK_SMOOTH_S,
         calc_version=HR_BLOCKS_VERSION,
+        segment_buckets_s=HR_SEGMENT_BUCKETS_S,
     )
     return curve, blocks, ActivityCoverage(
         activity_id=activity_id,
@@ -144,6 +162,7 @@ def compute_activity(
         span_s=span_s,
         longest_gap_s=longest_gap(grid),
         curve_windows=len(curve),
+        max_curve_duration_s=max((r["duration_s"] for r in curve), default=None),
     )
 
 

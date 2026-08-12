@@ -8,7 +8,8 @@ Jediná definice toho, co znamená „aktualizuj data":
     2. IMPORT  – biometrii z CSV do daily_biometrics
     3. LOAD    – nové/změněné FIT soubory do activities + records
     4. ANALYZE – per-activity metriky (inkrementálně) + denní metriky
-    5. EXPORT  – CSV z databáze, aby nezastarávaly pod rukama
+    5. HR      – tepová křivka, souvislé bloky a pokrytí (inkrementálně)
+    6. EXPORT  – CSV z databáze, aby nezastarávaly pod rukama
 
 Volá to CLI (scripts/main.py) i API (POST /api/sync/run), takže neexistují
 dvě mírně odlišné verze pipeline, které se časem rozejdou.
@@ -23,6 +24,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from config.settings import HR_COVERAGE_WARN_PCT
 from src.analytics.exports import export_all
 from src.analytics.pipeline import run_analytics
 from src.db.session import session_scope
@@ -30,6 +32,57 @@ from src.ingestion.biometrics_import import import_biometrics
 from src.ingestion.loader import load_fit_files
 
 log = logging.getLogger("pipeline")
+
+
+def step_hr(session) -> dict[str, Any]:
+    """
+    Předvýpočet tepové křivky, souvislých bloků a pokrytí.
+
+    Běží po ANALYZE, protože čte ``records`` až po sloučení fragmentů a
+    kanonizaci sportu. Bez tohohle kroku by dashboard u čerstvě
+    naimportovaných jízd ukazoval prázdnou křivku a chybějící pokrytí –
+    dřív se to spouštělo ručně přes ``python -m src.physio.cli hr``.
+
+    Inkrementálně: aktivity, které už mají řádky v aktuální ``calc_version``,
+    se přeskočí. Bump verze v settings tedy přepočet vynutí sám.
+    """
+    from sqlalchemy import select
+
+    from config.settings import HR_BLOCKS_VERSION, HR_CURVE_VERSION
+    from src.db import repository as repo
+    from src.db.models import Activity, ActivityHrBlocks, ActivityHrCurve
+    from src.physio.hr_batch import run_batch as run_hr_batch
+    from src.physio.persist import write_hr_rows
+
+    candidates = [
+        row[0] for row in session.execute(select(Activity.activity_id)).all()
+    ]
+    done = repo.hr_computed_ids(session, ActivityHrBlocks, HR_BLOCKS_VERSION)
+    # Křivka se posuzuje zvlášť, ale jen u aktivit, které nějaké řádky mají:
+    # aktivita kratší než nejkratší okno je legitimně nemá a jinak by se
+    # počítala při každém běhu znovu.
+    done -= repo.hr_computed_ids(session, ActivityHrCurve, 0) - repo.hr_computed_ids(
+        session, ActivityHrCurve, HR_CURVE_VERSION
+    )
+    todo = [a for a in candidates if a not in done]
+    if not todo:
+        return {"processed": 0, "cached": len(candidates)}
+
+    series = repo.read_hr_series(session, todo)
+    result = run_hr_batch(series, todo)
+    written = write_hr_rows(
+        session,
+        result.curve_rows,
+        result.block_rows,
+        [c.to_row(HR_CURVE_VERSION) for c in result.coverage],
+    )
+    return {
+        "processed": len(result.processed),
+        "cached": len(candidates) - len(todo),
+        "skipped_no_hr": len(result.skipped_no_hr),
+        "low_coverage": len(result.low_coverage(HR_COVERAGE_WARN_PCT)),
+        **written,
+    }
 
 
 def step_sync() -> dict[str, Any]:
@@ -95,6 +148,9 @@ def run_full_pipeline(
             "calendar_end": str(analytics.calendar_end),
             "warnings": analytics.warnings[:20],
         }
+
+        log.info("── HR ── tepová křivka, souvislé bloky, pokrytí")
+        report["hr"] = step_hr(session)
 
         log.info("── EXPORT ── CSV z databáze")
         report["export"] = export_all(session)

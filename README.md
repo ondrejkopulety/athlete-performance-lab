@@ -45,7 +45,7 @@ Nasazení na server (Docker + Traefik + Authentik) popisuje
 ## Pipeline
 
 ```
-SYNC ──▶ IMPORT ──▶ LOAD ──▶ ANALYZE ──▶ EXPORT
+SYNC ──▶ IMPORT ──▶ LOAD ──▶ ANALYZE ──▶ HR ──▶ EXPORT
 ```
 
 | Krok | Co dělá |
@@ -54,6 +54,7 @@ SYNC ──▶ IMPORT ──▶ LOAD ──▶ ANALYZE ──▶ EXPORT
 | **IMPORT** | Přetaví denní CSV (HRV, spánek, RHR, stres) do `daily_biometrics` |
 | **LOAD** | Deduplikuje Garmin vs. Strava FIT soubory a zapíše je do `activities` + `records` |
 | **ANALYZE** | Per-activity metriky (inkrementálně) + denní metriky (PMC, regenerace, kvalita) |
+| **HR** | Tepová křivka, souvislé bloky nad prahem a pokrytí dat (inkrementálně) |
 | **EXPORT** | CSV z databáze, aby nezastarávaly pod rukama |
 
 ```bash

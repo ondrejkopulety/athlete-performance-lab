@@ -3,22 +3,31 @@ import { useMemo, useRef, useState } from "react";
 import { toDays, type DashboardPayload } from "./api";
 import { DailyStatus } from "./components/DailyStatus";
 import { Header } from "./components/Header";
+import { HrBlocks } from "./components/HrBlocks";
+import { HrCurve } from "./components/HrCurve";
 import { LoadBalance } from "./components/LoadBalance";
 import { Quality } from "./components/Quality";
 import { Rides } from "./components/Rides";
 import { StateScreen } from "./components/StateScreen";
 import { buildClimb } from "./derive/climb";
 import { buildGauges } from "./derive/gauges";
+import { buildHrBlocks } from "./derive/hrblocks";
+import { buildHrCurve } from "./derive/hrcurve";
 import { buildHrr } from "./derive/hrr";
 import { buildPmc } from "./derive/pmc";
 import { buildPolarization, buildZoneTime, inRange } from "./derive/quality";
 import { buildRides, ridesSummary } from "./derive/rides";
 import { rangeOptions, selectWindow, type Range } from "./derive/ranges";
 import { THEMES, type ThemeName } from "./theme";
+import { useHrPanels } from "./useHrPanels";
 
 /**
- * Celý pohled nad načtenými daty. Stav je jen zobrazovací (období, vybraný
- * den, otevřená karta jízdy) – nic se odsud nedotazuje na server.
+ * Celý pohled nad načtenými daty. Stav je většinou jen zobrazovací (období,
+ * vybraný den, otevřená karta jízdy).
+ *
+ * Výjimkou jsou panely tepové křivky a souvislých bloků: jsou to agregace
+ * přes období a přes filtr "jen úplná data", takže se na server doptávají
+ * (viz useHrPanels).
  */
 export function Dashboard({
   payload,
@@ -42,9 +51,27 @@ export function Dashboard({
   const [hrrScrub, setHrrScrub] = useState(false);
   const [openRide, setOpenRide] = useState<string | null>(null);
 
+  // Panely křivky a bloků mají vlastní období – přepínají se stejnými
+  // taby, ale ptají se serveru, takže si drží i vlastní filtry.
+  const [hrRange, setHrRange] = useState<Range>(90);
+  const [completeOnly, setCompleteOnly] = useState(true);
+  const [compare, setCompare] = useState<"prev" | "year">("prev");
+  const [tolerance, setTolerance] = useState(15);
+  const [thresholdVersion, setThresholdVersion] = useState(0);
+
   const window = useMemo(() => selectWindow(days, range), [days, range]);
   const ranges = useMemo(() => rangeOptions(days), [days]);
   const { rows, startIdx } = window;
+
+  const hrWindow = useMemo(() => selectWindow(days, hrRange), [days, hrRange]);
+  const hrPanels = useHrPanels(
+    hrWindow.rows.length ? hrWindow.rows[0].d : null,
+    hrWindow.rows.length ? hrWindow.rows[hrWindow.rows.length - 1].d : null,
+    completeOnly,
+    compare,
+    tolerance,
+    thresholdVersion,
+  );
 
   const selIdxAbs = Math.min(
     Math.max(sel, startIdx),
@@ -88,6 +115,14 @@ export function Dashboard({
   const gauges = useMemo(
     () => buildGauges(T, payload.today, payload.last_known, mounted),
     [payload, T, mounted],
+  );
+  const curveView = useMemo(
+    () => buildHrCurve(hrPanels.curve, T),
+    [hrPanels.curve, T],
+  );
+  const blocksView = useMemo(
+    () => buildHrBlocks(hrPanels.blocks, T, mounted),
+    [hrPanels.blocks, T, mounted],
   );
 
   if (days.length === 0) {
@@ -134,6 +169,12 @@ export function Dashboard({
           readiness={readiness}
           statusDot={readyColor}
           theme={theme}
+          threshold={hrPanels.threshold}
+          onThresholdSaved={(next) => {
+            hrPanels.setThreshold(next);
+            // Nový práh = jiný řádek mřížky, ne přepočet dat.
+            setThresholdVersion((v) => v + 1);
+          }}
           onToggleTheme={onToggleTheme}
         />
 
@@ -197,6 +238,36 @@ export function Dashboard({
             setHrrScrub(active);
             if (!active) setHrrSel(null);
           }}
+        />
+
+        <HrCurve
+          view={curveView}
+          ranges={ranges}
+          range={hrRange}
+          rangeLabel={hrWindow.label}
+          onPickRange={setHrRange}
+          completeOnly={completeOnly}
+          onToggleComplete={setCompleteOnly}
+          compare={compare}
+          onToggleCompare={setCompare}
+          loading={hrPanels.loading}
+          error={hrPanels.error}
+          theme={T}
+        />
+
+        <HrBlocks
+          view={blocksView}
+          ranges={ranges}
+          range={hrRange}
+          rangeLabel={hrWindow.label}
+          onPickRange={setHrRange}
+          completeOnly={completeOnly}
+          onToggleComplete={setCompleteOnly}
+          tolerance={tolerance}
+          onPickTolerance={setTolerance}
+          loading={hrPanels.loading}
+          error={hrPanels.error}
+          theme={T}
         />
 
         <Rides

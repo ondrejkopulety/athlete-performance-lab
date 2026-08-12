@@ -456,7 +456,12 @@ def run_hr(args: argparse.Namespace) -> int:
 
         written = None
         if not args.dry_run:
-            written = write_hr_rows(session, result.curve_rows, result.block_rows)
+            written = write_hr_rows(
+                session,
+                result.curve_rows,
+                result.block_rows,
+                [c.to_row(HR_CURVE_VERSION) for c in result.coverage],
+            )
 
     if args.json:
         print(json.dumps(

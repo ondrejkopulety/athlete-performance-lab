@@ -6,7 +6,11 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+# Alias, aby šlo pole pojmenovat "date" a zároveň ho typovat datem: bez něj
+# se v anotaci "date | None" rozsvítí samotné pole (= None), ne typ.
+DateT = date
 
 
 class HealthResponse(BaseModel):
@@ -192,6 +196,23 @@ class DashboardBiometric(BaseModel):
     reference: float | None = None
 
 
+class RideCoverage(BaseModel):
+    """
+    Na jak úplných datech čísla jízdy stojí.
+
+    Ven jde hlavně ``ok`` a ``note``: uživatel potřebuje odpověď na "můžu
+    tomuhle číslu věřit", ne tři procenta k interpretaci. ``density`` je
+    informativní a **nikdy** nespouští varování – řídký zápis Smart
+    Recordingu není ztráta dat.
+    """
+
+    ok: bool
+    pct: float | None = None      # pokrytí po ffillu; rozhoduje o platnosti
+    density: float | None = None  # hustota vzorků; informativní
+    gap: int | None = None        # nejdelší souvislá díra v sekundách
+    note: str | None = None       # vysvětlení do detailu; None, když je vše v pořádku
+
+
 class DashboardRide(BaseModel):
     id: str
     d: date
@@ -203,6 +224,7 @@ class DashboardRide(BaseModel):
     trimp: float | None = None
     kcal: float | None = None
     z: list[float]                # minuty v zónách Z1–Z5
+    cov: RideCoverage | None = None
 
 
 class DashboardActivity(BaseModel):
@@ -215,6 +237,117 @@ class DashboardActivity(BaseModel):
     asc: float | None = None
     grad: float | None = None     # průměrný sklon stoupání v %
     hrr: float | None = None      # max. pokles tepu za 60 s
+    # Nezáměrná Z3 v sekundách: čas v Z3 mimo souvislé bloky. None = bloky
+    # pro tuhle aktivitu ještě spočítané nejsou, což není nula.
+    z3u: int | None = None
+    cov: RideCoverage | None = None
+
+
+# ── Panely tepové křivky a souvislých bloků ───────────────────────────────
+
+
+class CurvePoint(BaseModel):
+    """
+    Jeden bod křivky. ``hr = None`` znamená, že v období žádná jízda takhle
+    dlouhé okno nemá – čára v grafu tam končí, v tabulce je pomlčka. Nikdy
+    nula.
+    """
+
+    d: int                        # délka okna v sekundách
+    hr: float | None = None
+    activity_id: str | None = None
+    date: DateT | None = None
+    label: str | None = None
+
+
+class LastMaxEffort(BaseModel):
+    """Poslední jízda, která přispěla do referenčního bodu křivky."""
+
+    date: DateT
+    activity_id: str | None = None
+    label: str | None = None
+    duration_s: int
+    days_ago: int
+    stale: bool                   # přes hranici → zvýraznit
+
+
+class CurvePeriod(BaseModel):
+    label: str
+    from_date: date | None = None
+    to_date: date | None = None
+    rides_total: int
+    rides_excluded: int
+    points: list[CurvePoint]
+    last_max_effort: LastMaxEffort | None = None
+
+
+class HrCurveOut(BaseModel):
+    durations_s: list[int]
+    complete_only: bool
+    coverage_warn_pct: float
+    period: CurvePeriod
+    reference: CurvePeriod | None = None
+
+
+class SegmentBucket(BaseModel):
+    """Koš histogramu délek úseků – počet i součet času, obojí je důležité."""
+
+    bucket: str
+    count: int
+    seconds: int
+
+
+class BlockTotals(BaseModel):
+    segment_count: int
+    total_time_s: int
+    time_in_long_blocks_s: int
+
+
+class BlockSource(BaseModel):
+    activity_id: str | None = None
+    date: DateT | None = None
+    label: str | None = None
+
+
+class HrBlocksOut(BaseModel):
+    requested_bpm: int            # hranice zóny spočítaná z LTHR
+    threshold_bpm: int            # nejbližší práh z uložené mřížky
+    zone: str
+    lthr_bpm: int
+    tolerance_s: int
+    complete_only: bool
+    coverage_warn_pct: float
+    rides_total: int
+    rides_excluded: int
+    # None = v období není ani jedna jízda. Nula by znamenala "jel jsem, ale
+    # nad práh se nedostal", a to je jiné tvrzení.
+    longest_block_s: int | None = None
+    longest_block: BlockSource | None = None
+    previous_longest_block_s: int | None = None
+    trend_pct: float | None = None
+    hist: list[SegmentBucket]
+    totals: BlockTotals
+
+
+class ThresholdOut(BaseModel):
+    """Nastavený práh a jeho stáří – číslo, na kterém visí zbytek dashboardu."""
+
+    lthr_bpm: int
+    hr_max_bpm: int
+    valid_from: date
+    note: str | None = None
+    days_ago: int
+    stale: bool
+    stale_after_days: int
+    source: str                   # "user" | "settings"
+    zone_thresholds: dict[str, int]   # zóna → nejbližší práh z mřížky
+
+
+class ThresholdIn(BaseModel):
+    lthr_bpm: int = Field(ge=100, le=220)
+    hr_max_bpm: int = Field(ge=120, le=230)
+    valid_from: date | None = None
+    note: str | None = None
 
 
 class DashboardOut(BaseModel):

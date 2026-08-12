@@ -37,13 +37,24 @@ import numpy as np
 
 @dataclass(frozen=True)
 class BlockSummary:
-    """Souhrn souvislých úseků nad jedním prahem při jedné toleranci."""
+    """
+    Souhrn souvislých úseků nad jedním prahem při jedné toleranci.
+
+    ``hist_counts`` a ``hist_seconds`` nesou rozdělení délek úseků po koších
+    (``settings.HR_SEGMENT_BUCKETS_S``). Obojí, protože každé říká něco
+    jiného: 199 úseků pod 30 sekund vypadá jinak než 18 minut, které
+    dohromady dají. Ze ``segment_count`` a ``median_segment_s`` se rozdělení
+    zpětně sestavit nedá, a dopočítávat ho při zobrazení by znamenalo znovu
+    číst sekundová data – proto se ukládá tady.
+    """
 
     longest_block_s: int
     total_time_s: int
     time_in_long_blocks_s: int
     segment_count: int
     median_segment_s: float | None
+    hist_counts: list[int]
+    hist_seconds: list[int]
 
 
 def smooth_within_runs(heart_rate: np.ndarray, window: int) -> np.ndarray:
@@ -151,7 +162,41 @@ def find_segments(
     return np.array(merged, dtype=np.int64).reshape(-1, 2)
 
 
-def summarize_segments(segments: np.ndarray, long_block_s: int) -> BlockSummary:
+def segment_histogram(
+    lengths: np.ndarray, buckets_s: Sequence[int]
+) -> tuple[list[int], list[int]]:
+    """
+    Rozdělí délky úseků do košů – počet úseků a jejich součet času.
+
+    ``buckets_s`` jsou horní hranice (včetně); poslední koš je všechno nad
+    poslední hranicí, takže výsledek má vždy ``len(buckets_s) + 1`` položek.
+
+    Args:
+        lengths: Délky úseků v sekundách.
+        buckets_s: Horní hranice košů, vzestupně
+            (``settings.HR_SEGMENT_BUCKETS_S``).
+
+    Returns:
+        ``(počty_úseků, součty_sekund)``, obojí délky ``len(buckets_s) + 1``.
+    """
+    edges = [int(b) for b in buckets_s]
+    counts = [0] * (len(edges) + 1)
+    seconds = [0] * (len(edges) + 1)
+    if lengths.size == 0:
+        return counts, seconds
+
+    # searchsorted se stranou "left": délka rovná hranici patří do koše pod
+    # ní, takže úsek dlouhý přesně 30 s je "<30 s", ne "30–60 s".
+    idx = np.searchsorted(np.asarray(edges), lengths, side="left")
+    for bucket, length in zip(idx.tolist(), lengths.tolist()):
+        counts[bucket] += 1
+        seconds[bucket] += int(length)
+    return counts, seconds
+
+
+def summarize_segments(
+    segments: np.ndarray, long_block_s: int, buckets_s: Sequence[int] = ()
+) -> BlockSummary:
     """
     Převede úseky na čísla, která jdou do ``activity_hr_blocks``.
 
@@ -165,22 +210,29 @@ def summarize_segments(segments: np.ndarray, long_block_s: int) -> BlockSummary:
         segments: Pole ``(n, 2)`` z ``find_segments``.
         long_block_s: Délka, nad kterou se úsek počítá jako "dlouhý"
             (``settings.HR_BLOCK_LONG_S``). Porovnává se ostře.
+        buckets_s: Horní hranice košů histogramu délek
+            (``settings.HR_SEGMENT_BUCKETS_S``).
 
     Returns:
-        BlockSummary; při prázdném vstupu samé nuly a ``median_segment_s=None``.
+        BlockSummary; při prázdném vstupu samé nuly, ``median_segment_s=None``
+        a histogram plný nul – nula úseků je platná odpověď, ne "nespočítáno".
     """
     segments = np.asarray(segments, dtype=np.int64).reshape(-1, 2)
+    empty_counts, empty_seconds = segment_histogram(np.empty(0, dtype=np.int64), buckets_s)
     if segments.size == 0:
-        return BlockSummary(0, 0, 0, 0, None)
+        return BlockSummary(0, 0, 0, 0, None, empty_counts, empty_seconds)
 
     lengths = segments[:, 1] - segments[:, 0] + 1
     long = lengths[lengths > long_block_s]
+    counts, seconds = segment_histogram(lengths, buckets_s)
     return BlockSummary(
         longest_block_s=int(lengths.max()),
         total_time_s=int(lengths.sum()),
         time_in_long_blocks_s=int(long.sum()),
         segment_count=int(lengths.size),
         median_segment_s=round(float(np.median(lengths)), 1),
+        hist_counts=counts,
+        hist_seconds=seconds,
     )
 
 
@@ -193,6 +245,7 @@ def block_rows(
     long_block_s: int,
     smooth_s: int,
     calc_version: int,
+    segment_buckets_s: Sequence[int] = (),
 ) -> list[dict]:
     """
     Bloky pro celou mřížku prahů a tolerancí jako řádky pro ``activity_hr_blocks``.
@@ -211,6 +264,7 @@ def block_rows(
         long_block_s: Práh pro "dlouhý" úsek.
         smooth_s: Okno vyhlazení.
         calc_version: Verze výpočtu (``settings.HR_BLOCKS_VERSION``).
+        segment_buckets_s: Horní hranice košů histogramu délek úseků.
 
     Returns:
         Řádky připravené k upsertu.
@@ -234,7 +288,7 @@ def block_rows(
                 # Vyhlazeno už je; opakovaným vyhlazením by se okno rozšířilo.
                 smooth_s=1,
             )
-            summary = summarize_segments(segments, long_block_s)
+            summary = summarize_segments(segments, long_block_s, segment_buckets_s)
             rows.append(
                 {
                     "activity_id": activity_id,
@@ -245,6 +299,8 @@ def block_rows(
                     "time_in_long_blocks_s": summary.time_in_long_blocks_s,
                     "segment_count": summary.segment_count,
                     "median_segment_s": summary.median_segment_s,
+                    "segment_hist_counts": summary.hist_counts,
+                    "segment_hist_seconds": summary.hist_seconds,
                     "calc_version": calc_version,
                 }
             )

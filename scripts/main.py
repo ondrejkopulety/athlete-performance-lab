@@ -96,7 +96,7 @@ def main() -> None:
     # "invalid choice: ['all']".
     parser.add_argument(
         "steps", nargs="*",
-        choices=["sync", "load", "analyze", "export", "splits", "status", "all"],
+        choices=["sync", "load", "analyze", "hr", "export", "splits", "status", "all"],
         help="Které kroky spustit (výchozí: all; splits v all nejsou, viz --help)",
     )
     parser.add_argument("--skip-download", action="store_true",
@@ -148,6 +148,12 @@ def main() -> None:
             with session_scope() as session:
                 result = run_analytics(session, force_activities=args.force_metrics)
                 report["analytics"] = result.summary()
+
+        if "hr" in steps:
+            from src.pipeline import step_hr
+
+            with session_scope() as session:
+                report["hr"] = step_hr(session)
 
         if "export" in steps:
             from src.analytics.exports import export_all

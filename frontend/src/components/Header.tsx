@@ -1,6 +1,7 @@
-import type { Today } from "../api";
+import type { Threshold, Today } from "../api";
 import { czDate } from "../format";
-import type { ThemeName } from "../theme";
+import { THEMES, type ThemeName } from "../theme";
+import { ThresholdBadge } from "./ThresholdBadge";
 import { mono } from "./ui";
 
 const SUN =
@@ -12,12 +13,16 @@ export function Header({
   readiness,
   statusDot,
   theme,
+  threshold,
+  onThresholdSaved,
   onToggleTheme,
 }: {
   today: Today | null;
   readiness: number | null;
   statusDot: string;
   theme: ThemeName;
+  threshold: Threshold | null;
+  onThresholdSaved: (next: Threshold) => void;
   onToggleTheme: () => void;
 }) {
   const statusLabel =
@@ -57,7 +62,13 @@ export function Header({
         </h1>
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+        <ThresholdBadge
+          threshold={threshold}
+          onSaved={onThresholdSaved}
+          theme={THEMES[theme]}
+        />
+
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span
             style={{

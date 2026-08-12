@@ -18,15 +18,17 @@ from typing import Any, Iterable, Iterator, Sequence
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from src.db.models import (
     Activity,
     ActivityHrBlocks,
+    ActivityHrCoverage,
     ActivityHrCurve,
     ActivityMetrics,
+    AthleteThreshold,
     DailyBiometrics,
     DailyMetrics,
     Record,
@@ -150,6 +152,10 @@ def upsert_hr_blocks(session: Session, rows: list[dict]) -> int:
     )
 
 
+def upsert_hr_coverage(session: Session, rows: list[dict]) -> int:
+    return upsert(session, ActivityHrCoverage, rows, index_elements=["activity_id"])
+
+
 def hr_computed_ids(session: Session, model, calc_version: int) -> set[str]:
     """
     Aktivity, které už mají řádky v současné verzi výpočtu.
@@ -198,6 +204,283 @@ def read_hr_blocks(session: Session) -> pd.DataFrame:
             for b in session.scalars(stmt)
         ]
     )
+
+
+# ── Podklad pro panely dashboardu ─────────────────────────────────────────
+# Vrací se seznamy slovníků, ne DataFrame: jde o desítky až stovky řádků,
+# které putují rovnou do JSON, takže převod přes pandas by jen přidal krok.
+
+
+def _activity_label(sport: str | None, km: float | None, minutes: float | None) -> str:
+    """
+    Popisek jízdy do panelu – "odkud ten bod je".
+
+    Nepoužívá ``activities.activity_name``: ten je v celé databázi NULL
+    (Garmin ho v exportu neposílá), takže by z popisku zbylo prázdno.
+    """
+    parts = [(sport or "aktivita").split("/")[0]]
+    if km:
+        parts.append(f"{km:.0f} km")
+    if minutes:
+        hours, mins = divmod(int(minutes), 60)
+        parts.append(f"{hours}:{mins:02d}" if hours else f"{mins} min")
+    return " · ".join(parts)
+
+
+def read_curve_rows(
+    session: Session,
+    since: date | None = None,
+    until: date | None = None,
+    min_coverage_pct: float | None = None,
+) -> list[dict]:
+    """
+    Řádky tepové křivky za období, i s tím, ze které jízdy jsou.
+
+    Args:
+        session: Otevřená session.
+        since: Od data včetně.
+        until: Do data včetně.
+        min_coverage_pct: Když je zadané, projdou jen jízdy s pokrytím nad
+            hranicí. Jízdy, ke kterým pokrytí ještě spočítané není, se
+            **nevyřazují** – "neznámé pokrytí" není totéž co "špatné".
+
+    Returns:
+        Slovníky s ``duration_s``, ``max_mean_hr``, ``activity_id``,
+        ``date``, ``label``.
+    """
+    stmt = (
+        select(
+            ActivityHrCurve.duration_s,
+            ActivityHrCurve.max_mean_hr,
+            ActivityHrCurve.activity_id,
+            Activity.date,
+            Activity.sport,
+            Activity.distance_km,
+            Activity.duration_minutes,
+        )
+        .join(Activity, Activity.activity_id == ActivityHrCurve.activity_id)
+        .order_by(Activity.date)
+    )
+    stmt = _filter_period(stmt, since, until)
+    if min_coverage_pct is not None:
+        stmt = _filter_coverage(stmt, ActivityHrCurve.activity_id, min_coverage_pct)
+
+    return [
+        {
+            "duration_s": r.duration_s,
+            "max_mean_hr": float(r.max_mean_hr),
+            "activity_id": r.activity_id,
+            "date": r.date,
+            "label": _activity_label(r.sport, r.distance_km, r.duration_minutes),
+        }
+        for r in session.execute(stmt).all()
+    ]
+
+
+def read_block_rows(
+    session: Session,
+    threshold_bpm: int,
+    bridge_tolerance_s: int,
+    since: date | None = None,
+    until: date | None = None,
+    min_coverage_pct: float | None = None,
+) -> list[dict]:
+    """
+    Řádky souvislých bloků jednoho prahu a jedné tolerance za období.
+
+    Práh jde dovnitř jako parametr dotazu – změna LTHR tedy mění ``WHERE``,
+    ne uložená data.
+    """
+    stmt = (
+        select(
+            ActivityHrBlocks.activity_id,
+            ActivityHrBlocks.longest_block_s,
+            ActivityHrBlocks.total_time_s,
+            ActivityHrBlocks.time_in_long_blocks_s,
+            ActivityHrBlocks.segment_count,
+            ActivityHrBlocks.segment_hist_counts,
+            ActivityHrBlocks.segment_hist_seconds,
+            Activity.date,
+            Activity.sport,
+            Activity.distance_km,
+            Activity.duration_minutes,
+        )
+        .join(Activity, Activity.activity_id == ActivityHrBlocks.activity_id)
+        .where(
+            ActivityHrBlocks.threshold_bpm == threshold_bpm,
+            ActivityHrBlocks.bridge_tolerance_s == bridge_tolerance_s,
+        )
+        .order_by(Activity.date)
+    )
+    stmt = _filter_period(stmt, since, until)
+    if min_coverage_pct is not None:
+        stmt = _filter_coverage(stmt, ActivityHrBlocks.activity_id, min_coverage_pct)
+
+    return [
+        {
+            "activity_id": r.activity_id,
+            "longest_block_s": r.longest_block_s,
+            "total_time_s": r.total_time_s,
+            "time_in_long_blocks_s": r.time_in_long_blocks_s,
+            "segment_count": r.segment_count,
+            "segment_hist_counts": list(r.segment_hist_counts or []),
+            "segment_hist_seconds": list(r.segment_hist_seconds or []),
+            "date": r.date,
+            "label": _activity_label(r.sport, r.distance_km, r.duration_minutes),
+        }
+        for r in session.execute(stmt).all()
+    ]
+
+
+def read_block_totals(
+    session: Session, thresholds_bpm: Sequence[int], bridge_tolerance_s: int
+) -> dict[str, dict[int, dict[str, int]]]:
+    """
+    Čas nad prahem a čas v dlouhých úsecích pro vybrané prahy, po aktivitách.
+
+    Podklad pro nezáměrnou Z3, která se počítá rozdílem dvou prahů.
+
+    Returns:
+        ``{activity_id: {threshold: {"total_s": …, "long_s": …}}}``.
+    """
+    if not thresholds_bpm:
+        return {}
+
+    stmt = select(
+        ActivityHrBlocks.activity_id,
+        ActivityHrBlocks.threshold_bpm,
+        ActivityHrBlocks.total_time_s,
+        ActivityHrBlocks.time_in_long_blocks_s,
+    ).where(
+        ActivityHrBlocks.threshold_bpm.in_(list(thresholds_bpm)),
+        ActivityHrBlocks.bridge_tolerance_s == bridge_tolerance_s,
+    )
+
+    out: dict[str, dict[int, dict[str, int]]] = {}
+    for r in session.execute(stmt).all():
+        out.setdefault(r.activity_id, {})[r.threshold_bpm] = {
+            "total_s": int(r.total_time_s or 0),
+            "long_s": int(r.time_in_long_blocks_s or 0),
+        }
+    return out
+
+
+def read_hr_coverage(session: Session) -> dict[str, dict]:
+    """Pokrytí všech aktivit, podle ``activity_id``."""
+    stmt = select(
+        ActivityHrCoverage.activity_id,
+        ActivityHrCoverage.span_s,
+        ActivityHrCoverage.measured_s,
+        ActivityHrCoverage.usable_s,
+        ActivityHrCoverage.longest_gap_s,
+        ActivityHrCoverage.max_curve_duration_s,
+    )
+    return {
+        r.activity_id: {
+            "span_s": r.span_s,
+            "measured_s": r.measured_s,
+            "usable_s": r.usable_s,
+            "longest_gap_s": r.longest_gap_s,
+            "max_curve_duration_s": r.max_curve_duration_s,
+        }
+        for r in session.execute(stmt).all()
+    }
+
+
+def count_rides_in_period(
+    session: Session,
+    sport_pattern: str,
+    since: date | None = None,
+    until: date | None = None,
+    min_coverage_pct: float | None = None,
+) -> int:
+    """Kolik jízd v období projde filtrem – podklad pro "3 z 24 vyloučeny"."""
+    stmt = select(func.count(func.distinct(Activity.activity_id))).where(
+        Activity.sport.op("~*")(sport_pattern)
+    )
+    stmt = _filter_period(stmt, since, until)
+    if min_coverage_pct is not None:
+        stmt = _filter_coverage(stmt, Activity.activity_id, min_coverage_pct)
+    return int(session.scalar(stmt) or 0)
+
+
+def _filter_period(stmt, since: date | None, until: date | None):
+    if since is not None:
+        stmt = stmt.where(Activity.date >= since)
+    if until is not None:
+        stmt = stmt.where(Activity.date <= until)
+    return stmt
+
+
+def _filter_coverage(stmt, activity_id_col, min_coverage_pct: float):
+    """
+    Propustí jen jízdy s dostatečným pokrytím po ffillu.
+
+    Aktivita bez řádku v ``activity_hr_coverage`` projde: chybějící posudek
+    znamená "ještě se nepočítalo", ne "špatná data", a tiché vyřazení by
+    graf zmenšilo bez vysvětlení. Pokrytí se počítá v SQL, aby se do Pythonu
+    netahaly řádky, které stejně vypadnou.
+    """
+    return stmt.join(
+        ActivityHrCoverage,
+        ActivityHrCoverage.activity_id == activity_id_col,
+        isouter=True,
+    ).where(
+        (ActivityHrCoverage.activity_id.is_(None))
+        | (ActivityHrCoverage.span_s == 0)
+        | (
+            100.0 * ActivityHrCoverage.usable_s / func.nullif(ActivityHrCoverage.span_s, 0)
+            >= min_coverage_pct
+        )
+    )
+
+
+# ── Práh (LTHR / maximální tep) ───────────────────────────────────────────
+
+def read_current_threshold(session: Session) -> dict | None:
+    """Poslední platné nastavení prahu; ``None``, když si ho uživatel nikdy
+    nenastavil (pak platí měřené hodnoty ze settings)."""
+    stmt = (
+        select(AthleteThreshold)
+        .order_by(AthleteThreshold.valid_from.desc(), AthleteThreshold.id.desc())
+        .limit(1)
+    )
+    row = session.scalars(stmt).first()
+    if row is None:
+        return None
+    return {
+        "lthr_bpm": row.lthr_bpm,
+        "hr_max_bpm": row.hr_max_bpm,
+        "valid_from": row.valid_from,
+        "note": row.note,
+    }
+
+
+def insert_threshold(
+    session: Session,
+    lthr_bpm: int,
+    hr_max_bpm: int,
+    valid_from: date,
+    note: str | None = None,
+) -> dict:
+    """
+    Zapíše nové nastavení prahu jako další řádek historie.
+
+    Nepřepisuje předchozí: "nastaveno před N dny" musí být z čeho spočítat a
+    posun prahu v čase je sám o sobě informace. Uložených dat se to nedotkne –
+    LTHR řídí jen lookup prahu při zobrazení.
+    """
+    row = AthleteThreshold(
+        lthr_bpm=lthr_bpm, hr_max_bpm=hr_max_bpm, valid_from=valid_from, note=note
+    )
+    session.add(row)
+    session.flush()
+    return {
+        "lthr_bpm": row.lthr_bpm,
+        "hr_max_bpm": row.hr_max_bpm,
+        "valid_from": row.valid_from,
+        "note": row.note,
+    }
 
 
 def read_hr_series(

@@ -143,9 +143,14 @@ def write_reports_to_db(reports: list[ActivityRrReport]) -> int:
 # Tepová křivka a souvislé bloky
 # ═══════════════════════════════════════════════════════════════════════════
 
-def write_hr_rows(session, curve_rows: list[dict], block_rows: list[dict]) -> dict[str, int]:
+def write_hr_rows(
+    session,
+    curve_rows: list[dict],
+    block_rows: list[dict],
+    coverage_rows: list[dict] | None = None,
+) -> dict[str, int]:
     """
-    Zapíše tepovou křivku a bloky do jejich tabulek.
+    Zapíše tepovou křivku, bloky a pokrytí do jejich tabulek.
 
     Stejná cesta jako u posudku R-R: aktivity, které nejsou v ``activities``,
     se přeskočí, jinak by upsert spadl na cizí klíč.
@@ -158,18 +163,24 @@ def write_hr_rows(session, curve_rows: list[dict], block_rows: list[dict]) -> di
         session: Otevřená session.
         curve_rows: Řádky pro ``activity_hr_curve``.
         block_rows: Řádky pro ``activity_hr_blocks``.
+        coverage_rows: Řádky pro ``activity_hr_coverage``.
 
     Returns:
-        ``{"curve": n, "blocks": n}`` – počty zapsaných řádků.
+        ``{"curve": n, "blocks": n, "coverage": n}`` – počty zapsaných řádků.
     """
     from sqlalchemy import select
 
     from src.db import repository as repo
     from src.db.models import Activity
 
-    ids = {r["activity_id"] for r in curve_rows} | {r["activity_id"] for r in block_rows}
+    coverage_rows = coverage_rows or []
+    ids = (
+        {r["activity_id"] for r in curve_rows}
+        | {r["activity_id"] for r in block_rows}
+        | {r["activity_id"] for r in coverage_rows}
+    )
     if not ids:
-        return {"curve": 0, "blocks": 0}
+        return {"curve": 0, "blocks": 0, "coverage": 0}
 
     known = {
         aid
@@ -184,8 +195,10 @@ def write_hr_rows(session, curve_rows: list[dict], block_rows: list[dict]) -> di
 
     curve = [r for r in curve_rows if r["activity_id"] in known]
     blocks = [r for r in block_rows if r["activity_id"] in known]
+    coverage = [r for r in coverage_rows if r["activity_id"] in known]
 
     return {
         "curve": repo.upsert_hr_curve(session, curve),
         "blocks": repo.upsert_hr_blocks(session, blocks),
+        "coverage": repo.upsert_hr_coverage(session, coverage),
     }
