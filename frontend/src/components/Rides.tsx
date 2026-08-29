@@ -7,12 +7,14 @@ export function Rides({
   summary,
   openId,
   onToggle,
+  onOpenDetail,
   theme,
 }: {
   rides: RideCard[];
   summary: string;
   openId: string | null;
   onToggle: (id: string) => void;
+  onOpenDetail: (id: string) => void;
   theme: Theme;
 }) {
   return (
@@ -167,6 +169,26 @@ export function Rides({
                       {r.coverageNote}
                     </p>
                   )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenDetail(r.id);
+                    }}
+                    className="hover-fg"
+                    style={mono(10.5, {
+                      alignSelf: "flex-start",
+                      padding: "6px 0",
+                      border: "none",
+                      background: "none",
+                      color: "var(--warn)",
+                      letterSpacing: ".08em",
+                      textTransform: "uppercase",
+                      cursor: "pointer",
+                    })}
+                  >
+                    Detail jízdy →
+                  </button>
                 </div>
               )}
             </div>

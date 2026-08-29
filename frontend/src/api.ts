@@ -248,6 +248,69 @@ export async function fetchThreshold(signal?: AbortSignal): Promise<Threshold> {
   return get<Threshold>("/profile/threshold", signal);
 }
 
+// ── Detail aktivity ────────────────────────────────────────────────────────
+
+export interface ActivityDetail {
+  activity_id: string;
+  date: string;
+  start_time: string | null;
+  activity_name: string | null;
+  sport: string | null;
+  duration_minutes: number | null;
+  total_trimp: number | null;
+  avg_hr: number | null;
+  max_hr: number | null;
+  distance_km: number | null;
+  ascent_m: number | null;
+  descent_m: number | null;
+  avg_speed_kmh: number | null;
+  max_speed_kmh: number | null;
+  calories: number | null;
+  time_in_z1: number | null;
+  time_in_z2: number | null;
+  time_in_z3: number | null;
+  time_in_z4: number | null;
+  time_in_z5: number | null;
+  source: string | null;
+  /** Percentilové pořadí TRIMP vůči vlastní historii kardio aktivit; null,
+   *  dokud pipeline nemá dost aktivit na spolehlivý percentil. */
+  trimp_load_percentile: number | null;
+  /** Strain je denní (daily_metrics.whoop_strain), ne per-aktivita. */
+  whoop_strain: number | null;
+  activities_same_day: number | null;
+  fat_g: number | null;
+  carb_g: number | null;
+}
+
+export interface RecordPoint {
+  ts: string;
+  heart_rate: number | null;
+  speed: number | null;
+  power: number | null;
+  cadence: number | null;
+  altitude: number | null;
+  distance: number | null;
+  temperature: number | null;
+  position_lat: number | null;
+  position_long: number | null;
+  hr_zone: string | null;
+}
+
+export async function fetchActivity(id: string, signal?: AbortSignal): Promise<ActivityDetail> {
+  return get<ActivityDetail>(`/activities/${encodeURIComponent(id)}`, signal);
+}
+
+export async function fetchActivityRecords(
+  id: string,
+  resolution: string,
+  signal?: AbortSignal,
+): Promise<RecordPoint[]> {
+  return get<RecordPoint[]>(
+    `/activities/${encodeURIComponent(id)}/records?resolution=${resolution}`,
+    signal,
+  );
+}
+
 export async function saveThreshold(body: {
   lthr_bpm: number;
   hr_max_bpm: number;

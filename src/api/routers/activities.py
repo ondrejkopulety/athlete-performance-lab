@@ -5,12 +5,12 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.api.schemas import ActivityDetailOut, ActivityOut, RecordPoint
 from src.db import repository as repo
-from src.db.models import Activity, ActivityMetrics
+from src.db.models import Activity, ActivityMetrics, DailyMetrics
 from src.db.session import get_session
 
 router = APIRouter(prefix="/activities", tags=["activities"])
@@ -64,6 +64,16 @@ def get_activity(activity_id: str, session: Session = Depends(get_session)) -> d
                 if c.name not in ("activity_id", "computed_at", "rr_intervals_ms")
             }
         )
+
+    # Whoop strain je denní, ne per-aktivita – ukazuje se v detailu jízdy
+    # jako strain CELÉHO dne, protože jinou hodnotu pro jednu jízdu nemáme.
+    # Proto se posílá i počet aktivit toho dne: při druhé jízdě už číslo
+    # nepatří jen týhle a UI to musí umět přiznat, ne tvářit se přesně.
+    daily = session.get(DailyMetrics, activity.date)
+    payload["whoop_strain"] = daily.whoop_strain if daily is not None else None
+    payload["activities_same_day"] = session.scalar(
+        select(func.count()).select_from(Activity).where(Activity.date == activity.date)
+    )
     return payload
 
 

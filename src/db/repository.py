@@ -742,7 +742,15 @@ def downsample_records(
                avg(cadence)     AS cadence,
                avg(altitude)    AS altitude,
                max(distance)    AS distance,
-               avg(temperature) AS temperature
+               avg(temperature) AS temperature,
+               avg(position_lat)  AS position_lat,
+               avg(position_long) AS position_long,
+               -- Nejčastější zóna v koši. Zóny mají hranice z měřeného
+               -- ZONES (settings.py), ne z LTHR – hr_zone je zapsané
+               -- při načtení FIT (viz ingestion/loader.py), takže je to
+               -- čtení existující klasifikace, ne nový výpočet nad
+               -- sekundovými daty.
+               mode() WITHIN GROUP (ORDER BY hr_zone) AS hr_zone
         FROM records
         WHERE activity_id = :aid
         GROUP BY ts

@@ -180,6 +180,12 @@ class ActivityMetrics(Base):
     critical_hr: Mapped[float | None] = mapped_column(Float)
     tati_score: Mapped[float | None] = mapped_column(Float)
 
+    # Percentilové pořadí TRIMP téhle aktivity mezi kardio aktivitami
+    # v celé historii (viz src/analytics/activity.py:compute_trimp_load_percentile).
+    # Kalibrovaný podklad pro verdikt/gauge v detailu aktivity místo
+    # vymyšlených pevných prahů.
+    trimp_load_percentile: Mapped[float | None] = mapped_column(Float)
+
     # M/N/O – metabolismus, tekutiny, teplo
     fat_kcal: Mapped[float | None] = mapped_column(Float)
     carb_kcal: Mapped[float | None] = mapped_column(Float)

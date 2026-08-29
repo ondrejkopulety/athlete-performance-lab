@@ -41,9 +41,9 @@ RESTING_HR      = 41           # Resting heart rate (bpm)
 ZONES: dict[str, tuple[int, int]] = {
     "Z1": (100, 136),
     "Z2": (137, 155),
-    "Z3": (156, 171),
-    "Z4": (172, 183),
-    "Z5": (184, 199),
+    "Z3": (156, 162),
+    "Z4": (163, 173),
+    "Z5": (173, 208),
 }
 ZONE_LABELS     = list(ZONES.keys())   # ["Z1", "Z2", "Z3", "Z4", "Z5"]
 ZONE_2_CAP      = 155                  # Talk-Test ceiling (bpm) – top of Z2
@@ -280,13 +280,15 @@ DATABASE_URL: str = os.getenv("DATABASE_URL") or (
 #       oprava parametru DFA-alpha1
 #   3 = sloučení fragmentů Strava exportů, stacionární tep se počítá do zón,
 #       doplněné mezery v tepu, kanonický název sportu
-ACTIVITY_METRICS_VERSION: int = 3
+#   4 = trimp_load_percentile – percentilové pořadí zátěže vůči vlastní
+#       historii kardio aktivit (detail aktivity, verdikt/gauge)
+ACTIVITY_METRICS_VERSION: int = 5  # Nové tepové zóny – změna Z3/Z4/Z5 (8/2026)
 
 # Bump when a daily formula changes → vynutí full rebuild daily_metrics.
 #   2 = 90denní baseline klidového tepu, lthr_estimate
 #   3 = zrušena recovery_tax_hours_daily, přibyl Garmin Training Readiness
 #   4 = osa začíná první aktivitou, ne první biometrií (viz calendar.py)
-DAILY_METRICS_VERSION: int = 4
+DAILY_METRICS_VERSION: int = 5  # Nové tepové zóny – změna Z3/Z4/Z5 (8/2026)
 
 # ============================================================
 # PRAHOVÝ TEP Z TERÉNNÍCH DAT (LTHR)

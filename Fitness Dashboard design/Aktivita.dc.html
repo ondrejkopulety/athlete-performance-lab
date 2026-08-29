@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#09090b;--card:#0c0c0f;--line:#17171a;--line2:#1f1f23;--track:#151518;--fg:#fafafa;--mut:#8b8b93;--faint:#7a7a84;
+    --ok:#a3e635;--warn:#facc15;--bad:#f43f5e;--orange:#fb923c;--blue:#38bdf8;--z1:#4ade80;--z2:#60a5fa;--z3:#facc15;--z4:#fb923c;--z5:#f43f5e}
+  html,body{margin:0;padding:0;background:var(--bg);-webkit-font-smoothing:antialiased}
+  *{box-sizing:border-box}
+  a{color:var(--warn);text-decoration:none}
+  a:hover{opacity:.8}
+  ::selection{background:#facc1533}
+  @keyframes skel{0%{background-position:180% 0}100%{background-position:-80% 0}}
+  .skel{border-radius:10px;background:linear-gradient(90deg,var(--track) 12%,#22222a 34%,var(--track) 56%);background-size:220% 100%;animation:skel 1.35s ease-in-out infinite}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+</style>
+</helmet>
+<div style="min-height:100vh;background:var(--bg);color:var(--fg);font-family:'DM Sans',system-ui,sans-serif;padding:12px 8px 20px">
+<div style="max-width:880px;margin:0 auto;display:flex;flex-direction:column;gap:10px">
+
+  <sc-if value="{{ loading }}" hint-placeholder-val="{{ true }}">
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;align-items:center;gap:14px;padding:4px 2px 0">
+        <span class="skel" style="width:36px;height:36px;border-radius:50%"></span>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <span class="skel" style="width:82px;height:10px"></span>
+          <span class="skel" style="width:156px;height:26px"></span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;padding:0 2px">
+        <sc-for list="{{ skelChips }}" as="w" hint-placeholder-count="2">
+          <span class="skel" style="width:{{ w }};height:32px;border-radius:999px"></span>
+        </sc-for>
+      </div>
+      <div style="display:flex;gap:8px;padding:0 2px">
+        <sc-for list="{{ skelTabs }}" as="w" hint-placeholder-count="3">
+          <span class="skel" style="width:{{ w }};height:26px;border-radius:999px"></span>
+        </sc-for>
+      </div>
+      <span class="skel" style="height:300px;border-radius:18px"></span>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(164px,1fr));gap:10px">
+        <sc-for list="{{ skelStats }}" as="i" hint-placeholder-count="5">
+          <span class="skel" style="height:116px;border-radius:16px"></span>
+        </sc-for>
+      </div>
+      <span class="skel" style="height:290px;border-radius:18px"></span>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ ready }}" hint-placeholder-val="{{ false }}">
+  <div style="display:flex;flex-direction:column;gap:10px;animation:fadeIn .45s ease both">
+  <header style="display:flex;align-items:flex-start;gap:14px;padding:4px 2px 0">
+    <a href="Readiness Dashboard.dc.html" aria-label="Zpět" style="flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:36px;height:36px;margin-top:16px;border-radius:50%;color:var(--fg)">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 18l-6-6 6-6"></path></svg>
+    </a>
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--mut)">Aktivita</span>
+      <div style="display:flex;align-items:center;gap:10px">
+        <h1 style="margin:0;font-size:29px;line-height:1.1;font-weight:500;letter-spacing:-.02em">Cyklistika</h1>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--mut)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"></path></svg>
+      </div>
+    </div>
+    <div style="display:flex;gap:14px;padding-top:14px;color:var(--fg)">
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"></path></svg>
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor"><circle cx="12" cy="5" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="12" cy="19" r="1.7"></circle></svg>
+    </div>
+  </header>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;padding:0 2px">
+    <sc-for list="{{ chips }}" as="c" hint-placeholder-count="2">
+      <div style="display:flex;align-items:center;gap:7px;padding:7px 13px;border:1px solid var(--line2);border-radius:999px;background:var(--card)">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="var(--mut)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="{{ c.icon }}"></path></svg>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--fg);white-space:nowrap">{{ c.label }}</span>
+      </div>
+    </sc-for>
+  </div>
+
+  <nav style="display:flex;gap:22px;padding:2px 2px 0;border-bottom:1px solid var(--line)">
+    <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="3">
+      <button onClick="{{ t.pick }}" style="{{ t.style }}">{{ t.label }}</button>
+    </sc-for>
+  </nav>
+
+  <sc-if value="{{ isOverview }}" hint-placeholder-val="{{ true }}">
+  <div style="display:flex;flex-direction:column;gap:10px">
+
+  <section style="position:relative;border:1px solid var(--line);border-radius:18px;background:var(--card);overflow:hidden;height:300px">
+    <div style="position:absolute;inset:0;background:#101216"></div>
+    <svg viewBox="0 0 860 300" preserveAspectRatio="xMidYMid meet" style="position:absolute;inset:0;width:100%;height:100%">
+      <sc-for list="{{ mapRoads }}" as="r" hint-placeholder-count="14">
+        <path d="{{ r.d }}" fill="none" stroke="#1c2027" stroke-width="{{ r.w }}" stroke-linecap="round"></path>
+      </sc-for>
+      <sc-for list="{{ mapWater }}" as="w" hint-placeholder-count="2">
+        <path d="{{ w }}" fill="none" stroke="#16232e" stroke-width="7" stroke-linecap="round"></path>
+      </sc-for>
+      <sc-for list="{{ route }}" as="s" hint-placeholder-count="24">
+        <path d="{{ s.d }}" fill="none" stroke="{{ s.color }}" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"></path>
+      </sc-for>
+      <circle cx="{{ finishX }}" cy="{{ finishY }}" r="9" fill="#0c0e12" stroke="#fafafa" stroke-width="2"></circle>
+    </svg>
+    <div style="position:absolute;inset:0;pointer-events:none">
+      <sc-for list="{{ mapLabels }}" as="l" hint-placeholder-count="6">
+        <span style="position:absolute;left:{{ l.left }};top:{{ l.top }};font-size:11.5px;line-height:1.25;color:#8a929e;white-space:pre-line;text-shadow:0 1px 3px rgba(0,0,0,.85)">{{ l.name }}</span>
+      </sc-for>
+    </div>
+    <div style="position:absolute;top:14px;left:14px;padding:12px 14px;border-radius:12px;background:rgba(9,9,11,.82);backdrop-filter:blur(8px);pointer-events:none;display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;justify-content:space-between;gap:22px">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#fafafa">Tep</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8b8b93">bpm</span>
+      </div>
+      <sc-for list="{{ legend }}" as="l" hint-placeholder-count="5">
+        <div style="display:flex;align-items:center;gap:9px">
+          <span style="width:9px;height:9px;border-radius:50%;background:{{ l.color }}"></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#e4e4e7">{{ l.range }}</span>
+        </div>
+      </sc-for>
+    </div>
+    <div style="position:absolute;top:14px;right:14px;display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;background:rgba(9,9,11,.82);backdrop-filter:blur(8px);pointer-events:none">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fafafa" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path></svg>
+    </div>
+  </section>
+
+  <section style="display:grid;grid-template-columns:repeat(auto-fit,minmax(164px,1fr));gap:10px">
+    <sc-for list="{{ stats }}" as="s" hint-placeholder-count="5">
+      <div style="border:1px solid var(--line);border-radius:16px;background:var(--card);padding:14px 15px;display:flex;flex-direction:column;gap:6px;min-width:0">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.label }}</span>
+        <div style="display:flex;align-items:baseline;gap:5px;min-width:0">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:26px;line-height:1.05;letter-spacing:-.03em;white-space:nowrap">{{ s.value }}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--faint)">{{ s.unit }}</span>
+        </div>
+        <div style="display:flex;align-items:baseline;gap:8px;padding-top:8px;margin-top:2px;border-top:1px solid var(--line);min-width:0">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.subLabel }}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:{{ s.subColor }};margin-left:auto;white-space:nowrap">{{ s.subValue }}</span>
+        </div>
+      </div>
+    </sc-for>
+  </section>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;align-items:stretch">
+    <section style="border:1px solid var(--line);border-radius:18px;background:var(--card);padding:14px;display:flex;flex-direction:column;gap:12px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)">Jak těžká byla jízda</span>
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--mut)" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01" stroke-linecap="round"></path></svg>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:18px;flex-wrap:wrap">
+        <div style="position:relative;width:150px;height:150px;flex:0 0 auto">
+          <svg viewBox="0 0 100 100" style="width:100%;height:100%;transform:rotate(135deg)">
+            <circle cx="50" cy="50" r="42" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="{{ gaugeTrack }}"></circle>
+            <circle cx="50" cy="50" r="42" fill="none" stroke="var(--warn)" stroke-width="9" stroke-linecap="round" stroke-dasharray="{{ gaugeVal }}" style="transition:stroke-dasharray .9s cubic-bezier(.22,1,.36,1)"></circle>
+          </svg>
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:32px;line-height:1;letter-spacing:-.03em">{{ trimp }}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.16em;color:var(--mut)">TRIMP</span>
+          </div>
+        </div>
+        <div style="position:relative;width:150px;height:150px;flex:0 0 auto">
+          <svg viewBox="0 0 100 100" style="width:100%;height:100%;transform:rotate(135deg)">
+            <circle cx="50" cy="50" r="42" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="{{ gaugeTrack }}"></circle>
+            <circle cx="50" cy="50" r="42" fill="none" stroke="var(--orange)" stroke-width="9" stroke-linecap="round" stroke-dasharray="{{ strainVal }}" style="transition:stroke-dasharray .9s cubic-bezier(.22,1,.36,1)"></circle>
+          </svg>
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:32px;line-height:1;letter-spacing:-.03em">{{ strain }}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.16em;color:var(--mut)">STRAIN</span>
+          </div>
+        </div>
+      </div>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--warn)">{{ verdict }}</span>
+    </section>
+
+    <section style="border:1px solid var(--line);border-radius:18px;background:var(--card);padding:12px;display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)">Tepové zóny</span>
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--mut)" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01" stroke-linecap="round"></path></svg>
+      </div>
+      <div style="display:grid;grid-template-columns:44px 62px 34px 1fr;gap:7px 10px;align-items:center">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)">Zóna</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)">Čas</span>
+        <span></span><span></span>
+        <sc-for list="{{ zones }}" as="z" hint-placeholder-count="5">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:{{ z.color }}">{{ z.name }}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--fg);white-space:nowrap">{{ z.time }}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--mut);text-align:right">{{ z.pct }} %</span>
+          <span style="height:7px;border-radius:99px;background:{{ z.color }};width:{{ z.w }};min-width:7px;transition:width .7s cubic-bezier(.22,1,.36,1)"></span>
+        </sc-for>
+      </div>
+      <div style="height:1px;background:var(--line)"></div>
+      <div style="display:grid;grid-template-columns:44px 62px 34px 1fr;gap:10px;align-items:center">
+        <span style="font-size:13px;color:var(--mut)">Celkem</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:12px">{{ totalTime }}</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--mut);text-align:right">100%</span>
+        <span></span>
+      </div>
+    </section>
+  </div>
+
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isCharts }}" hint-placeholder-val="{{ false }}">
+  <div style="display:flex;flex-direction:column;gap:10px">
+
+  <section style="border:1px solid var(--line);border-radius:18px;background:var(--card);padding:12px;display:flex;flex-direction:column;gap:10px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)">Tep × rychlost</span>
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--mut)" stroke-width="1.7"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01" stroke-linecap="round"></path></svg>
+    </div>
+    <div style="display:flex;gap:9px;flex-wrap:wrap">
+      <sc-for list="{{ toggles }}" as="t" hint-placeholder-count="3">
+        <button onClick="{{ t.toggle }}" style="{{ t.style }}"><span style="width:14px;height:3px;border-radius:2px;background:{{ t.swatch }}"></span>{{ t.label }}</button>
+      </sc-for>
+    </div>
+    <div style="position:relative;padding:0 32px 0 28px">
+      <div style="position:absolute;left:0;top:0;width:26px;height:180px">
+        <span style="position:absolute;left:0;top:-14px;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:var(--bad)">bpm</span>
+        <sc-for list="{{ hrAxis }}" as="a" hint-placeholder-count="4">
+          <span style="position:absolute;left:0;top:{{ a.top }};transform:translateY(-50%);font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--bad)">{{ a.label }}</span>
+        </sc-for>
+      </div>
+      <div style="position:absolute;right:0;top:0;width:32px;height:180px">
+        <span style="position:absolute;right:0;top:-14px;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:var(--blue)">km/h</span>
+        <sc-for list="{{ spdAxis }}" as="a" hint-placeholder-count="4">
+          <span style="position:absolute;right:0;top:{{ a.top }};transform:translateY(-50%);font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--blue)">{{ a.label }}</span>
+        </sc-for>
+      </div>
+      <svg viewBox="0 0 700 200" preserveAspectRatio="none" style="width:100%;height:180px;display:block">
+        <defs>
+          <linearGradient id="hrFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#f43f5e" stop-opacity="0.36"></stop>
+            <stop offset="100%" stop-color="#f43f5e" stop-opacity="0"></stop>
+          </linearGradient>
+          <linearGradient id="spdFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.22"></stop>
+            <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"></stop>
+          </linearGradient>
+          <linearGradient id="elFill2" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#a3e635" stop-opacity="0.16"></stop>
+            <stop offset="100%" stop-color="#a3e635" stop-opacity="0"></stop>
+          </linearGradient>
+        </defs>
+        <path d="{{ elArea2 }}" fill="url(#elFill2)" opacity="{{ showEl }}"></path>
+        <path d="{{ spdArea }}" fill="url(#spdFill)" opacity="{{ showSpd }}"></path>
+        <path d="{{ hrArea }}" fill="url(#hrFill)" opacity="{{ showHr }}"></path>
+        <path d="{{ elLine2 }}" fill="none" stroke="#a3e635" stroke-width="1.4" stroke-linejoin="round" vector-effect="non-scaling-stroke" opacity="{{ showEl }}"></path>
+        <path d="{{ spdLine }}" fill="none" stroke="#38bdf8" stroke-width="1.2" stroke-linejoin="round" vector-effect="non-scaling-stroke" opacity="{{ showSpd }}"></path>
+        <path d="{{ hrLine }}" fill="none" stroke="#f43f5e" stroke-width="1.2" stroke-linejoin="round" vector-effect="non-scaling-stroke" opacity="{{ showHr }}"></path>
+      </svg>
+      <div style="display:flex;justify-content:space-between;padding-top:8px">
+        <sc-for list="{{ timeAxis }}" as="t" hint-placeholder-count="5">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--faint)">{{ t }}</span>
+        </sc-for>
+      </div>
+    </div>
+  </section>
+
+  <section style="border:1px solid var(--line);border-radius:18px;background:var(--card);padding:14px;display:flex;flex-direction:column;gap:12px">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)">Průměrný tep po 5 km</span>
+    <div style="display:flex;flex-direction:column;gap:2px">
+      <sc-for list="{{ splits }}" as="s" hint-placeholder-count="15">
+        <div style="display:flex;flex-direction:column;gap:7px;padding:11px 2px;border-bottom:1px solid var(--line)">
+          <div style="display:flex;align-items:baseline;gap:10px">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--mut);white-space:nowrap">{{ s.range }}</span>
+            <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:16px;color:{{ s.color }};white-space:nowrap">{{ s.hr }}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--faint)">bpm</span>
+          </div>
+          <div style="height:8px;border-radius:99px;background:var(--track);overflow:hidden">
+            <div style="height:100%;width:{{ s.w }};border-radius:99px;background:{{ s.color }};transition:width .7s cubic-bezier(.22,1,.36,1)"></div>
+          </div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap">
+            <sc-for list="{{ s.cells }}" as="m" hint-placeholder-count="3">
+              <span style="display:flex;align-items:baseline;gap:5px;font-family:'JetBrains Mono',monospace;font-size:11.5px;white-space:nowrap"><span style="font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)">{{ m.label }}</span>{{ m.value }}</span>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+  </section>
+
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isClimb }}" hint-placeholder-val="{{ false }}">
+  <div style="display:flex;flex-direction:column;gap:10px">
+
+  <section style="border:1px solid var(--line);border-radius:18px;background:var(--card);padding:14px;display:flex;flex-direction:column;gap:12px">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)">Výškový profil</span>
+    <div style="display:flex;gap:22px;flex-wrap:wrap;align-items:center">
+      <div style="flex:1;min-width:260px;position:relative;padding-left:38px">
+        <span style="position:absolute;left:0;top:-15px;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:var(--faint)">m</span>
+        <div style="position:absolute;left:0;top:0;width:34px;height:160px">
+          <sc-for list="{{ elevAxis }}" as="a" hint-placeholder-count="4">
+            <span style="position:absolute;left:0;top:{{ a.top }};transform:translateY(-50%);font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--faint)">{{ a.label }}</span>
+          </sc-for>
+        </div>
+        <svg viewBox="0 0 700 180" preserveAspectRatio="none" style="width:100%;height:160px;display:block">
+          <defs>
+            <linearGradient id="elevFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.34"></stop>
+              <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.02"></stop>
+            </linearGradient>
+          </defs>
+          <sc-for list="{{ elevGrid }}" as="g" hint-placeholder-count="4">
+            <line x1="0" y1="{{ g.y }}" x2="700" y2="{{ g.y }}" stroke="#2a2a30" stroke-width="1" stroke-dasharray="4 5" vector-effect="non-scaling-stroke"></line>
+          </sc-for>
+          <path d="{{ elevArea }}" fill="url(#elevFill)"></path>
+          <path d="{{ elevLine }}" fill="none" stroke="#38bdf8" stroke-width="1.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"></path>
+        </svg>
+        <div style="display:flex;justify-content:space-between;padding-top:8px">
+          <sc-for list="{{ distAxis }}" as="d" hint-placeholder-count="5">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--faint)">{{ d }}</span>
+          </sc-for>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:16px;min-width:170px">
+        <sc-for list="{{ elevStats }}" as="e" hint-placeholder-count="3">
+          <div style="display:flex;align-items:flex-start;gap:11px">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="var(--fg)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="margin-top:2px"><path d="{{ e.icon }}"></path></svg>
+            <div style="display:flex;flex-direction:column;gap:2px">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:17px">{{ e.value }}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut)">{{ e.label }}</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="height:1px;background:var(--line)"></div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px">
+      <sc-for list="{{ terrain }}" as="t" hint-placeholder-count="3">
+        <div style="display:flex;flex-direction:column;gap:9px;padding:14px;border:1px solid var(--line);border-radius:14px;background:#0e0e12">
+          <div style="display:flex;align-items:center;gap:9px">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="{{ t.color }}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="{{ t.icon }}"></path></svg>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut)">{{ t.label }}</span>
+            <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:11px;color:{{ t.color }}">{{ t.pct }} %</span>
+          </div>
+          <div style="display:flex;align-items:baseline;gap:8px">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:23px;line-height:1;letter-spacing:-.02em">{{ t.km }}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint)">km</span>
+            <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--mut);white-space:nowrap">{{ t.time }}</span>
+          </div>
+          <div style="height:5px;border-radius:99px;background:var(--track);overflow:hidden">
+            <div style="height:100%;width:{{ t.w }};border-radius:99px;background:{{ t.color }};transition:width .7s cubic-bezier(.22,1,.36,1)"></div>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+  </section>
+
+  <section style="border:1px solid var(--line);border-radius:18px;background:var(--card);padding:12px;display:flex;flex-direction:column;gap:10px">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)">Vyhodnocené kopce</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--faint)">{{ climbSummary }}</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <sc-for list="{{ climbs }}" as="c" hint-placeholder-count="5">
+        <div style="display:flex;flex-direction:column;gap:11px;padding:13px 14px;border:1px solid var(--line);border-radius:14px;background:#0e0e12">
+          <div style="display:flex;align-items:center;gap:9px;min-width:0">
+            <span style="flex:0 0 auto;padding:2px 7px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:10px;background:{{ c.catBg }};color:{{ c.catColor }}">{{ c.cat }}</span>
+            <span style="font-size:13px;line-height:1.3;text-wrap:pretty">{{ c.name }}</span>
+            <span style="margin-left:auto;flex:0 0 auto;font-family:'JetBrains Mono',monospace;font-size:13px;color:{{ c.vamColor }};white-space:nowrap">{{ c.vam }}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(64px,1fr));gap:10px">
+            <sc-for list="{{ c.cells }}" as="m" hint-placeholder-count="5">
+              <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)">{{ m.label }}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:13px;white-space:nowrap">{{ m.value }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+  </section>
+
+  </div>
+  </sc-if>
+
+  </div>
+  </sc-if>
+
+</div>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const RIDE = {
+  date: "9. 8. 2026", start: "12:50", km: 73.02, dur: 191.15,
+  avgSpeed: 22.9, avgHr: 153, ascent: 1021, descent: 1035, minEl: 296, maxEl: 498,
+  trimp: 189, units: 3.2, maxHr: 186, maxSpeed: 48.3, kcal: 2340,
+  weather: "18 °C, polojasno", wind: "JZ 21 km/h", fatG: 104, carbG: 233,
+  climbs: [
+    { name: "Stoupání k Českému Šternberku", cat: "4", gain: 148, len: 3.1, grad: 4.8, hr: 168, speed: 13.9, vam: 862 },
+    { name: "Trhový Štěpánov – jih", cat: "4", gain: 121, len: 2.4, grad: 5.0, hr: 172, speed: 12.6, vam: 905 },
+    { name: "Nad Sázavou", cat: "3", gain: 196, len: 4.6, grad: 4.3, hr: 165, speed: 14.8, vam: 794 },
+    { name: "Ledeč – serpentiny", cat: "3", gain: 174, len: 3.4, grad: 5.1, hr: 174, speed: 12.1, vam: 928 },
+    { name: "Uhlířské Janovice – hřeben", cat: "5", gain: 86, len: 2.2, grad: 3.9, hr: 158, speed: 16.4, vam: 705 }
+  ],
+  zones: [
+    { name: "Z5", range: "≥ 180 bpm", min: 7.15, color: "var(--z5)" },
+    { name: "Z4", range: "160–179 bpm", min: 21.5, color: "var(--z4)" },
+    { name: "Z3", range: "140–159 bpm", min: 74.5, color: "var(--z3)" },
+    { name: "Z2", range: "120–139 bpm", min: 68.0, color: "var(--z2)" },
+    { name: "Z1", range: "< 120 bpm", min: 20.0, color: "var(--z1)" }
+  ]
+};
+
+const rnd = seed => () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+
+class Component extends DCLogic {
+  state = { mounted: false, hide: {}, loading: true, activeTab: "Přehled" };
+
+  toggleSeries = k => this.setState(s => ({ hide: { ...s.hide, [k]: !s.hide[k] } }));
+  componentDidMount() {
+    setTimeout(() => this.setState({ loading: false }), 900);
+    setTimeout(() => this.setState({ mounted: true }), 1050);
+  }
+
+  hms(mins) {
+    const t = Math.round(mins * 60), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+  }
+
+  series(n, seed, fn) {
+    const r = rnd(seed); const out = []; let v = 0;
+    for (let i = 0; i < n; i++) { v = v * 0.72 + (r() - 0.5); out.push(fn(i / (n - 1), v)); }
+    return out;
+  }
+
+  path(vals, lo, hi, W, H, pad) {
+    const x = i => (i / (vals.length - 1)) * W;
+    const y = v => pad + (1 - (v - lo) / (hi - lo)) * (H - pad * 2);
+    return {
+      line: vals.map((v, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1)).join(" "),
+      area: vals.map((v, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1)).join(" ") + " L" + W + " " + H + " L0 " + H + " Z"
+    };
+  }
+
+  renderVals() {
+    const { activeTab, mounted } = this.state;
+    const N = 260;
+
+    const hr = this.series(N, 7, (t, n) => {
+      const ramp = t < 0.06 ? 92 + t / 0.06 * 58 : 150 + t * 14;
+      return Math.max(90, Math.min(190, ramp + n * 13 + Math.sin(t * 26) * 7 + Math.sin(t * 61) * 4));
+    });
+    const spd = this.series(N, 23, (t, n) => {
+      const base = t < 0.05 ? 4 + t / 0.05 * 20 : 25 - Math.sin(t * 9) * 5;
+      return Math.max(2, Math.min(48, base + n * 9 + Math.sin(t * 44) * 5));
+    });
+    const raw = this.series(N, 41, (t, n) => {
+      const hump = Math.exp(-Math.pow((t - 0.5) / 0.19, 2));
+      return Math.sin(t * 3.1 - 0.6) * 60 + Math.sin(t * 1.4) * 80 + hump * 110 + n * 22 + Math.sin(t * 30) * 12;
+    });
+    const rLo = Math.min(...raw), rHi = Math.max(...raw);
+    const elev = raw.map(v => RIDE.minEl + (v - rLo) / (rHi - rLo) * (RIDE.maxEl - RIDE.minEl));
+
+    const HRLO = 90, HRHI = 195, SPLO = 0, SPHI = 50, ELLO = 220, ELHI = 520;
+    const hrP = this.path(hr, HRLO, HRHI, 700, 200, 6);
+    const spdP = this.path(spd, SPLO, SPHI, 700, 200, 6);
+    const elevP = this.path(elev, ELLO, ELHI, 700, 180, 10);
+    const posPct = (v, lo, hi, VB, pad) => ((pad + (1 - (v - lo) / (hi - lo)) * (VB - pad * 2)) / VB * 100).toFixed(2) + "%";
+    const mkAxis = (vals, lo, hi, VB, pad) => vals.map(v => ({ label: v, top: posPct(v, lo, hi, VB, pad) }));
+
+    const zTotal = RIDE.zones.reduce((a, z) => a + z.min, 0);
+    const zMax = Math.max(...RIDE.zones.map(z => z.min));
+    const C = 2 * Math.PI * 42, ARC = 0.75 * C;
+    const gaugeFrac = Math.min(1, RIDE.trimp / 300);
+    // Whoop-style strain: same formula as Readiness Dashboard (trimp/22, capped at 21)
+    const strainScore = Math.min(21, RIDE.trimp / 22);
+    const strainFrac = strainScore / 21;
+
+    const TABS = ["Přehled", "Grafy", "Stoupání"];
+    const splitHr = [148, 154, 145, 151, 149, 152, 156, 158, 163, 159, 157, 160, 154, 151, 150];
+    const splitSpd = [24.8, 21.6, 26.9, 19.4, 23.1, 27.5, 18.2, 20.7, 16.9, 22.4, 25.8, 19.8, 24.3, 28.1, 23.6];
+    const splitGrad = [0.4, 2.1, -1.6, 3.4, 0.9, -2.2, 4.1, 2.8, 5.2, 1.4, -1.9, 3.1, 0.6, -2.6, -0.8];
+    const splitVam = [0, 742, 0, 823, 0, 0, 886, 796, 941, 654, 0, 812, 0, 0, 0];
+    const gradColor = g => g >= 3 ? "var(--orange)" : g >= 1 ? "var(--warn)" : g <= -1 ? "var(--z1)" : "var(--mut)";
+    const CATBG = { "5": "#38bdf822", "4": "#facc1522", "3": "#fb923c22", "2": "#f43f5e22", "1": "#f43f5e33" };
+    const CATFG = { "5": "var(--blue)", "4": "var(--warn)", "3": "var(--orange)", "2": "var(--bad)", "1": "var(--bad)" };
+    const hrColor = v => v >= 160 ? "var(--bad)" : v >= 155 ? "#f97316" : v >= 150 ? "var(--orange)" : "var(--warn)";
+
+    const el2 = this.path(elev, ELLO, ELHI, 700, 200, 6);
+    const hidden = this.state.hide;
+    const SER = [
+      { k: "hr", label: "Tep (bpm)", swatch: "#f43f5e" },
+      { k: "spd", label: "Rychlost (km/h)", swatch: "#38bdf8" },
+      { k: "el", label: "Výška " + RIDE.minEl + "–" + RIDE.maxEl + " m", swatch: "#a3e635" }
+    ];
+
+    const R0 = rnd(97);
+    const pts = [];
+    for (let i = 0; i < 96; i++) {
+      const a = i / 96 * Math.PI * 2;
+      const wob = 1 + Math.sin(a * 3.2) * 0.16 + Math.sin(a * 5.7) * 0.09 + (R0() - 0.5) * 0.05;
+      pts.push([430 + Math.cos(a) * 250 * wob, 150 + Math.sin(a) * 96 * wob]);
+    }
+    const zoneOf = v => v < 120 ? "#38bdf8" : v < 140 ? "#4ade80" : v < 160 ? "#facc15" : v < 180 ? "#fb923c" : "#f43f5e";
+    const route = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      route.push({ d: "M" + a[0].toFixed(1) + " " + a[1].toFixed(1) + " L" + b[0].toFixed(1) + " " + b[1].toFixed(1),
+        color: zoneOf(hr[Math.floor(i / pts.length * hr.length)]) });
+    }
+    const R1 = rnd(311);
+    const mapRoads = Array.from({ length: 18 }, () => {
+      const x = R1() * 860, y = R1() * 300, dx = (R1() - 0.5) * 420, dy = (R1() - 0.5) * 260;
+      return { d: "M" + x.toFixed(0) + " " + y.toFixed(0) + " l" + dx.toFixed(0) + " " + dy.toFixed(0), w: (0.8 + R1() * 1.8).toFixed(1) };
+    });
+
+    return {
+      loading: this.state.loading, ready: !this.state.loading,
+      skelChips: ["148px", "128px"], skelTabs: ["90px", "70px", "90px"], skelStats: [1, 2, 3, 4, 5],
+      route, mapRoads,
+      mapWater: ["M0 214 q140 -30 250 8 t250 -14 t360 24", "M120 0 q60 90 -10 150"],
+      mapLabels: [
+        { name: "Sázava", x: 250, y: 56 }, { name: "Český\nŠternberk", x: 396, y: 118 },
+        { name: "Uhlířské\nJanovice", x: 566, y: 62 }, { name: "Zruč nad\nSázavou", x: 706, y: 104 },
+        { name: "Ledeč nad\nSázavou", x: 172, y: 222 }, { name: "Trhový\nŠtěpánov", x: 552, y: 244 }
+      ].map(l => ({ name: l.name, left: (l.x / 860 * 100).toFixed(2) + "%", top: (l.y / 300 * 100).toFixed(2) + "%" })),
+      finishX: pts[24][0].toFixed(1), finishY: pts[24][1].toFixed(1),
+      elLine2: el2.line, elArea2: el2.area,
+      showHr: hidden.hr ? "0" : "1", showSpd: hidden.spd ? "0" : "1", showEl: hidden.el ? "0" : "1",
+      toggles: SER.map(s => ({
+        label: s.label, swatch: hidden[s.k] ? "var(--faint)" : s.swatch,
+        toggle: () => this.toggleSeries(s.k),
+        style: "display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;border:1px solid " +
+          (hidden[s.k] ? "transparent" : "var(--line2)") + ";background:" + (hidden[s.k] ? "transparent" : "var(--track)") +
+          ";color:" + (hidden[s.k] ? "var(--faint)" : "var(--fg)") + ";font-family:'DM Sans',sans-serif;font-size:11.5px;cursor:pointer;transition:.2s"
+      })),
+      chips: [
+        { icon: "M7 3v3M17 3v3M4 9h16M5 6h14a1 1 0 011 1v12a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1z", label: RIDE.date + " · " + RIDE.start },
+        { icon: "M17.5 19a4 4 0 00-.7-7.94 6 6 0 00-11.6 1.6A3.5 3.5 0 006 19z", label: RIDE.weather }
+      ],
+      tabs: TABS.map(label => ({
+        label,
+        pick: () => this.setState({ activeTab: label }),
+        style: "appearance:none;background:none;border:none;padding:0 0 11px;cursor:pointer;white-space:nowrap;font-family:'JetBrains Mono',monospace;font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;transition:.2s;color:" +
+          (activeTab === label ? "var(--fg)" : "var(--mut)") + ";border-bottom:2px solid " + (activeTab === label ? "var(--warn)" : "transparent")
+      })),
+      isOverview: activeTab === "Přehled", isCharts: activeTab === "Grafy", isClimb: activeTab === "Stoupání",
+      legend: [
+        { color: "var(--z2)", range: "< 120" }, { color: "var(--z1)", range: "120–139" },
+        { color: "var(--z3)", range: "140–159" }, { color: "var(--z4)", range: "160–179" },
+        { color: "var(--z5)", range: "≥ 180" }
+      ],
+      stats: [
+        { label: "Vzdálenost", value: RIDE.km.toFixed(2).replace(".", ","), unit: "km",
+          subLabel: "Převýšení", subValue: RIDE.ascent.toLocaleString("cs-CZ") + " m", subColor: "var(--fg)" },
+        { label: "Průměrná rychlost", value: RIDE.avgSpeed.toFixed(1).replace(".", ","), unit: "km/h",
+          subLabel: "Maximum", subValue: RIDE.maxSpeed.toFixed(1).replace(".", ",") + " km/h", subColor: "var(--blue)" },
+        { label: "Průměrný tep", value: RIDE.avgHr, unit: "bpm",
+          subLabel: "Maximum", subValue: RIDE.maxHr + " bpm", subColor: "var(--bad)" },
+        { label: "Kalorie", value: RIDE.kcal.toLocaleString("cs-CZ"), unit: "kcal",
+          subLabel: "Tuky / cukry", subValue: RIDE.fatG + " g / " + RIDE.carbG + " g", subColor: "var(--fg)" },
+        { label: "Délka aktivity", value: this.hms(RIDE.dur), unit: "",
+          subLabel: "Start", subValue: RIDE.start, subColor: "var(--fg)" }
+      ],
+      terrain: [
+        { label: "Do kopce", km: 24.1, min: 78.4, color: "var(--orange)", icon: "M4 18l7-11 4 6 5-8" },
+        { label: "Z kopce", km: 26.8, min: 52.6, color: "var(--z1)", icon: "M4 7l5 8 4-6 7 11" },
+        { label: "Po rovině", km: 22.1, min: 60.15, color: "var(--blue)", icon: "M4 12h16" }
+      ].map(t => ({
+        label: t.label, color: t.color, icon: t.icon,
+        km: t.km.toFixed(1).replace(".", ","),
+        time: this.hms(t.min),
+        pct: Math.round(t.km / RIDE.km * 100),
+        w: (this.state.mounted ? t.km / RIDE.km * 100 : 0).toFixed(1) + "%"
+      })),
+      climbSummary: RIDE.climbs.length + " kopců · " + RIDE.climbs.reduce((a, c) => a + c.gain, 0) + " m nastoupáno",
+      climbs: RIDE.climbs.map(c => ({
+        name: c.name, cat: "K" + c.cat, catBg: CATBG[c.cat], catColor: CATFG[c.cat],
+        vam: c.vam + " m/h", vamColor: c.vam >= 900 ? "var(--ok)" : c.vam >= 750 ? "var(--warn)" : "var(--mut)",
+        cells: [
+          { label: "Převýšení", value: c.gain + " m" },
+          { label: "Délka", value: c.len.toFixed(1).replace(".", ",") + " km" },
+          { label: "Sklon", value: c.grad.toFixed(1).replace(".", ",") + " %" },
+          { label: "Tep", value: c.hr + " bpm" },
+          { label: "Rychlost", value: c.speed.toFixed(1).replace(".", ",") + " km/h" }
+        ]
+      })),
+      hrLine: hrP.line, hrArea: hrP.area, spdLine: spdP.line, spdArea: spdP.area,
+      hrAxis: mkAxis([180, 150, 120, 90], HRLO, HRHI, 200, 6),
+      spdAxis: mkAxis([45, 30, 15, 0], SPLO, SPHI, 200, 6),
+      timeAxis: ["0:00", this.hms(RIDE.dur * 0.25), this.hms(RIDE.dur * 0.5), this.hms(RIDE.dur * 0.75), this.hms(RIDE.dur)],
+      trimp: RIDE.trimp,
+      strain: strainScore.toFixed(1).replace(".", ","),
+      verdict: RIDE.trimp >= 300 ? "Velmi velká zátěž" : RIDE.trimp >= 150 ? "Velká zátěž" : "Střední zátěž",
+      gaugeTrack: ARC.toFixed(1) + " " + C.toFixed(1),
+      gaugeVal: (mounted ? gaugeFrac * ARC : 0).toFixed(1) + " " + C.toFixed(1),
+      strainVal: (mounted ? strainFrac * ARC : 0).toFixed(1) + " " + C.toFixed(1),
+      zones: RIDE.zones.map(z => ({
+        name: z.name, range: z.range, color: z.color,
+        time: this.hms(z.min),
+        pct: Math.round(z.min / zTotal * 100),
+        w: (mounted ? z.min / zMax * 100 : 0).toFixed(1) + "%"
+      })),
+      totalTime: this.hms(zTotal),
+      elevLine: elevP.line, elevArea: elevP.area,
+      elevGrid: [520, 420, 320, 220].map(v => ({ y: (10 + (1 - (v - ELLO) / (ELHI - ELLO)) * 160).toFixed(1) })),
+      elevAxis: mkAxis([520, 420, 320, 220], ELLO, ELHI, 180, 10),
+      distAxis: ["0 km", "18 km", "36 km", "54 km", RIDE.km.toFixed(1).replace(".", ",") + " km"],
+      elevStats: [
+        { icon: "M12 19V5M6 11l6-6 6 6", value: RIDE.ascent.toLocaleString("cs-CZ") + " m", label: "Stoupání" },
+        { icon: "M12 5v14M6 13l6 6 6-6", value: RIDE.descent.toLocaleString("cs-CZ") + " m", label: "Klesání" },
+        { icon: "M3 19l6-9 4 5 3-4 5 8z", value: RIDE.minEl + " – " + RIDE.maxEl + " m", label: "Min – max" }
+      ],
+      splits: splitHr.map((v, i) => ({
+        range: i === splitHr.length - 1 ? "70–73 km" : (i * 5) + "–" + (i * 5 + 5) + " km",
+        hr: v, color: hrColor(v),
+        w: (this.state.mounted ? (v - 130) / 45 * 100 : 0).toFixed(1) + "%",
+        cells: [
+          { label: "Rychlost", value: splitSpd[i].toFixed(1).replace(".", ",") + " km/h" },
+          { label: "Sklon", value: (splitGrad[i] > 0 ? "+" : splitGrad[i] < 0 ? "−" : "") + Math.abs(splitGrad[i]).toFixed(1).replace(".", ",") + " %" },
+          { label: "VAM", value: splitVam[i] ? splitVam[i] + " m/h" : "—" }
+        ]
+      }))
+    };
+  }
+}
+
+</script>
+</body>
+</html>

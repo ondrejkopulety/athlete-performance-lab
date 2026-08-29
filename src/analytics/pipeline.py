@@ -61,7 +61,7 @@ ACTIVITY_METRIC_COLUMNS = [
 
 # Metriky odvozené z celé historie, ne z jedné aktivity. Musí se
 # přepisovat u všech řádků, jinak by se v tabulce míchaly různé prahy.
-GLOBAL_METRIC_COLUMNS = ["critical_hr", "tati_score"]
+GLOBAL_METRIC_COLUMNS = ["critical_hr", "tati_score", "trimp_load_percentile"]
 
 DAILY_METRIC_COLUMNS = [
     "trimp", "trimp_epoc", "ctl", "atl", "tsb",

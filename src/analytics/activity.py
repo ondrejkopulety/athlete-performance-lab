@@ -735,6 +735,40 @@ def compute_critical_hr(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def compute_trimp_load_percentile(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Percentilové pořadí zátěže (TRIMP) této aktivity mezi kardio aktivitami
+    v celé historii atleta.
+
+    Slouží jako kalibrovaný podklad pro verdikt a strop gauge v detailu
+    aktivity, náhrada za vymyšlené pevné prahy (300/150 TRIMP z mockupu).
+    Přednost má ``trimp_adjusted`` (RHR platný k datu aktivity), fallback
+    ``total_trimp`` z parseru pro aktivity, které se ještě nepřepočítaly.
+
+    Stejná populace jako u ``compute_critical_hr`` (běh + kolo), ne jen
+    kolo – i běžecká zátěž patří do srovnání "jak těžký byl tenhle trénink
+    vůči zbytku", a rozdělovat podle sportu by při pár desítkách běhů dalo
+    šumový percentil.
+    """
+    df = df.copy()
+    df["trimp_load_percentile"] = np.nan
+    if "sport" not in df.columns or df.empty:
+        return df
+
+    cardio_mask = df["sport"].str.contains("|".join(CARDIO_SPORTS), case=False, na=False)
+    trimp = pd.to_numeric(df.get("trimp_adjusted"), errors="coerce")
+    if "total_trimp" in df.columns:
+        trimp = trimp.fillna(pd.to_numeric(df["total_trimp"], errors="coerce"))
+
+    eligible = cardio_mask & trimp.notna()
+    if eligible.sum() < CHR_MIN_ACTIVITIES:
+        return df
+
+    ranked = trimp[eligible].rank(pct=True, method="max") * 100
+    df.loc[eligible, "trimp_load_percentile"] = ranked.round(1)
+    return df
+
+
 def compute_activity_table(activities: pd.DataFrame) -> pd.DataFrame:
     """
     Všechny vektorové per-activity metriky najednou.
@@ -755,6 +789,7 @@ def compute_activity_table(activities: pd.DataFrame) -> pd.DataFrame:
     df = compute_epoc(df)
     df = compute_tte(df)
     df = compute_critical_hr(df)
+    df = compute_trimp_load_percentile(df)
     return df
 
 

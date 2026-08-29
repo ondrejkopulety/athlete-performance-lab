@@ -34,12 +34,14 @@ export function Dashboard({
   theme,
   mounted,
   onToggleTheme,
+  onOpenActivity,
 }: {
   payload: DashboardPayload;
   theme: ThemeName;
   /** Až po prvním vykreslení se rozjedou animace kroužků a pruhů. */
   mounted: boolean;
   onToggleTheme: () => void;
+  onOpenActivity: (id: string) => void;
 }) {
   const T = THEMES[theme];
   const days = useMemo(() => toDays(payload.days), [payload]);
@@ -275,6 +277,7 @@ export function Dashboard({
           summary={ridesSummary(payload.rides)}
           openId={openRide}
           onToggle={(id) => setOpenRide((cur) => (cur === id ? null : id))}
+          onOpenDetail={onOpenActivity}
           theme={T}
         />
       </div>

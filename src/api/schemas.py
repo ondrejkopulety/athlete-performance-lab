@@ -114,6 +114,7 @@ class ActivityOut(BaseModel):
 
 
 class ActivityDetailOut(ActivityOut):
+    max_speed_kmh: float | None = None
     cardiac_drift: float | None = None
     max_hrr_60s: float | None = None
     durability_pct: float | None = None
@@ -128,6 +129,14 @@ class ActivityDetailOut(ActivityOut):
     time_at_threshold_min: float | None = None
     critical_hr: float | None = None
     tati_score: float | None = None
+    # Percentilové pořadí TRIMP vůči vlastní historii kardio aktivit –
+    # podklad pro verdikt/gauge, viz activity.py:compute_trimp_load_percentile.
+    trimp_load_percentile: float | None = None
+    # Whoop strain je denní (daily_metrics), ne per-aktivita – posílá se
+    # sem s počtem aktivit toho dne, aby UI vědělo, kdy hodnota nepatří
+    # jen téhle jízdě.
+    whoop_strain: float | None = None
+    activities_same_day: int | None = None
     fat_g: float | None = None
     carb_g: float | None = None
     fluid_loss_l: float | None = None
@@ -144,6 +153,11 @@ class RecordPoint(BaseModel):
     altitude: float | None = None
     distance: float | None = None
     temperature: float | None = None
+    # Souřadnice pro mapu trasy v detailu aktivity (SVG polyline, bez
+    # podkladové mapy – viz rozhodnutí v CLAUDE.md/konverzaci o mapě).
+    position_lat: float | None = None
+    position_long: float | None = None
+    hr_zone: str | None = None
 
 
 class SyncStatusOut(BaseModel):

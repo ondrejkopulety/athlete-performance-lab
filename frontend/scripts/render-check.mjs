@@ -31,7 +31,13 @@ import { THEMES } from "../src/theme";
 
 export function render(payload, theme, mounted) {
   return renderToString(
-    createElement(Dashboard, { payload, theme, mounted, onToggleTheme: () => {} }),
+    createElement(Dashboard, {
+      payload,
+      theme,
+      mounted,
+      onToggleTheme: () => {},
+      onOpenActivity: () => {},
+    }),
   );
 }
 
