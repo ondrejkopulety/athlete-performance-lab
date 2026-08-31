@@ -25,10 +25,29 @@ from sqlalchemy.orm import Session
 
 from config.settings import SPLITS_DIR, SUMMARIES_DIR
 from src.db import repository as repo
+from src.ingestion.sport import CYCLING_SPORT_REGEX, cycling_mask
 
 log = logging.getLogger("analytics.exports")
 
-CYCLING_SPORT_PATTERN = r"cycl|biking|ride"
+# Zpětná kompatibilita: dashboard router importuje tenhle název pro SQL filtr.
+CYCLING_SPORT_PATTERN = CYCLING_SPORT_REGEX
+
+# Sloupce, které se do master exportu nedávají: experimentální metriky, u
+# kterých by přítomnost v hlavním CSV svědčila o důvěryhodnosti, jakou nemají.
+EXPERIMENTAL_ACTIVITY_COLUMNS = ["resp_rate_rsa"]
+
+__all__ = [
+    "CYCLING_SPORT_PATTERN",
+    "EXPERIMENTAL_ACTIVITY_COLUMNS",
+    "cycling_mask",
+    "export_activities",
+    "export_hr_blocks",
+    "export_daily_metrics",
+    "export_cycling",
+    "export_cycling_splits",
+    "export_all",
+]
+
 
 # Pořadí sloupců v cyklo splitech. Drží se tvaru, který psala původní
 # scripts/legacy/split_cycling_activities.py, aby starší soubory ve složce
@@ -71,6 +90,7 @@ def export_activities(session: Session, path: Path | None = None) -> int:
     if not curve.empty:
         df = df.merge(curve, on="activity_id", how="left")
 
+    df = df.drop(columns=EXPERIMENTAL_ACTIVITY_COLUMNS, errors="ignore")
     return _write(df.sort_values("date"), path, "Aktivity")
 
 
@@ -111,8 +131,7 @@ def export_cycling(
     if df.empty or "sport" not in df.columns:
         return _write(pd.DataFrame(), path, "Cyklistika")
 
-    mask = df["sport"].str.contains(CYCLING_SPORT_PATTERN, case=False, na=False, regex=True)
-    return _write(df[mask].sort_values("date"), path, "Cyklistika")
+    return _write(df[cycling_mask(df["sport"])].sort_values("date"), path, "Cyklistika")
 
 
 def _fmt(value: object, decimals: int = 0, default: str = "0") -> str:
@@ -164,8 +183,7 @@ def export_cycling_splits(
         log.warning("Cyklo splity: v databázi nejsou aktivity.")
         return result
 
-    mask = acts["sport"].str.contains(CYCLING_SPORT_PATTERN, case=False, na=False, regex=True)
-    cycling = acts[mask].sort_values("date")
+    cycling = acts[cycling_mask(acts["sport"])].sort_values("date")
     if cycling.empty:
         log.warning("Cyklo splity: žádná cyklistická aktivita.")
         return result

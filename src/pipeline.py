@@ -7,9 +7,10 @@ Jediná definice toho, co znamená „aktualizuj data":
     1. SYNC    – stáhne novinky z Garmin Connect (CSV + FIT na disk)
     2. IMPORT  – biometrii z CSV do daily_biometrics
     3. LOAD    – nové/změněné FIT soubory do activities + records
-    4. ANALYZE – per-activity metriky (inkrementálně) + denní metriky
-    5. HR      – tepová křivka, souvislé bloky a pokrytí (inkrementálně)
-    6. EXPORT  – CSV z databáze, aby nezastarávaly pod rukama
+    4. STRAVA  – doplní odkazy na aktivity na Stravě (activities.strava_id)
+    5. ANALYZE – per-activity metriky (inkrementálně) + denní metriky
+    6. HR      – tepová křivka, souvislé bloky a pokrytí (inkrementálně)
+    7. EXPORT  – CSV z databáze, aby nezastarávaly pod rukama
 
 Volá to CLI (scripts/main.py) i API (POST /api/sync/run), takže neexistují
 dvě mírně odlišné verze pipeline, které se časem rozejdou.
@@ -46,6 +47,11 @@ def step_hr(session) -> dict[str, Any]:
     Inkrementálně: aktivity, které už mají řádky v aktuální ``calc_version``,
     se přeskočí. Bump verze v settings tedy přepočet vynutí sám.
     """
+    # Importy v těle kroku jsou záměrné: ``step_sync`` tahá ``garminconnect``
+    # (těžké, nemusí být nainstalované u ``--skip-download``), ``step_hr``
+    # zas ``src.physio`` batch. Držíme je stranou modulového importu, aby CLI
+    # pro nesouvisející příkazy startovalo rychle a nepadalo na chybějící
+    # volitelné závislosti.
     from sqlalchemy import select
 
     from config.settings import HR_BLOCKS_VERSION, HR_CURVE_VERSION
@@ -83,6 +89,36 @@ def step_hr(session) -> dict[str, Any]:
         "low_coverage": len(result.low_coverage(HR_COVERAGE_WARN_PCT)),
         **written,
     }
+
+
+def step_strava_map(session) -> dict[str, Any]:
+    """
+    Doplnění odkazů na aktivity na Stravě (``activities.strava_id``).
+
+    Deduplikace zvládne spárovat jen jízdy, které mají Strava FIT na disku;
+    novější jízdy odkaz získají tady, spárováním se seznamem aktivit z REST
+    API Stravy podle času startu. Viz ``src/ingestion/strava_map.py``.
+
+    Selhání (chybí OAuth v ``.env``, síť, rate limit) není fatální – jen se
+    zaloguje, stejně jako u SYNC.
+    """
+    from src.ingestion.strava_map import StravaAuthError, map_strava_ids
+
+    try:
+        res = map_strava_ids(session)
+        return {
+            "ok": True,
+            "updated": res.updated,
+            "already_linked": res.already_linked,
+            "unmatched": res.unmatched,
+            "strava_activities": res.strava_activities,
+        }
+    except StravaAuthError as exc:
+        log.warning("Strava párování přeskočeno: %s", exc)
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Strava párování selhalo (%s) – pokračuji.", exc)
+        return {"ok": False, "error": str(exc)}
 
 
 def step_sync() -> dict[str, Any]:
@@ -137,6 +173,13 @@ def run_full_pipeline(
             "failed": load_result.failed,
             "records_written": load_result.records_written,
         }
+
+        if skip_download:
+            log.info("Krok STRAVA přeskočen (--skip-download).")
+            report["strava_map"] = {"skipped": True}
+        else:
+            log.info("── STRAVA ── odkazy na aktivity na Stravě")
+            report["strava_map"] = step_strava_map(session)
 
         log.info("── ANALYZE ── metriky")
         analytics = run_analytics(session, force_activities=force_activity_metrics)

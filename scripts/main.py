@@ -6,6 +6,7 @@ main.py – Garmin Training Analytics · CLI
     python scripts/main.py                    # celá pipeline
     python scripts/main.py sync               # jen stažení z Garmin Connect
     python scripts/main.py load               # jen FIT soubory → databáze
+    python scripts/main.py strava             # jen doplnění odkazů na Stravu
     python scripts/main.py analyze            # jen přepočet metrik
     python scripts/main.py export             # CSV exporty z databáze
     python scripts/main.py splits             # CSV po jednotlivých cyklo trénincích
@@ -96,7 +97,7 @@ def main() -> None:
     # "invalid choice: ['all']".
     parser.add_argument(
         "steps", nargs="*",
-        choices=["sync", "load", "analyze", "hr", "export", "splits", "status", "all"],
+        choices=["sync", "load", "strava", "analyze", "hr", "export", "splits", "status", "all"],
         help="Které kroky spustit (výchozí: all; splits v all nejsou, viz --help)",
     )
     parser.add_argument("--skip-download", action="store_true",
@@ -141,6 +142,16 @@ def main() -> None:
                 report["biometrics_days"] = import_biometrics(session)
                 result = load_fit_files(session, force=args.force)
                 report["load"] = result.summary()
+
+        if "strava" in steps:
+            from src.ingestion.strava_map import StravaAuthError, map_strava_ids
+
+            with session_scope() as session:
+                try:
+                    report["strava_map"] = map_strava_ids(session).summary()
+                except StravaAuthError as exc:
+                    log.warning("Strava párování přeskočeno: %s", exc)
+                    report["strava_map"] = f"přeskočeno: {exc}"
 
         if "analyze" in steps:
             from src.analytics.pipeline import run_analytics

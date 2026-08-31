@@ -41,19 +41,28 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from datetime import timezone as _tz
+
 import pandas as pd
 from fitparse import FitFile
 
 from config.settings import (
-    MAX_HR, RESTING_HR as BASELINE_RHR, ZONE_2_CAP,
-    ZONES, ZONE_LABELS, FIT_DIR,
-    DEFAULT_SPEED_THRESHOLD_MS, CYCLING_SPEED_THRESHOLD_MS,
+    CYCLING_SPEED_THRESHOLD_MS,
+    DEFAULT_SPEED_THRESHOLD_MS,
+    FIT_DIR,
     HR_ONLY_MAX_MINUTES,
-    TRIMP_K1, TRIMP_K2,
+    HR_PLAUSIBLE_MAX_BPM,
+    HR_PLAUSIBLE_MIN_BPM,
+    MAX_HR,
+    TRIMP_K1,
+    TRIMP_K2,
+    ZONE_2_CAP,
+    ZONE_LABELS,
+    ZONES,
 )
-
-from datetime import timezone as _tz
-
+from config.settings import (
+    RESTING_HR as BASELINE_RHR,
+)
 from src.ingestion.sport import normalize_sport
 
 
@@ -283,6 +292,20 @@ def _safe_int(v) -> Optional[int]:
         return None
 
 
+def _plausible_hr(v: Optional[int]) -> Optional[int]:
+    """
+    Okamžitý tep, nebo None, když leží mimo fyziologicky možný rozsah.
+
+    Optický snímač v pauze hlásí jednotky bpm (v datech avg_hr až 3), hrudní
+    pás zas krátké špičky nad 220. Takový vzorek není tep, ale porucha –
+    zahazuje se stejně jako chybějící hodnota, aby neředil avg_hr ani
+    nenafoukl nejvyšší okno tepové křivky.
+    """
+    if v is None:
+        return None
+    return v if HR_PLAUSIBLE_MIN_BPM <= v <= HR_PLAUSIBLE_MAX_BPM else None
+
+
 def _parse_timestamp(value) -> Optional[datetime]:
     """Čas záznamu jako naivní UTC – FIT dává datetime, Strava občas řetězec."""
     if isinstance(value, datetime):
@@ -486,7 +509,7 @@ def parse_fit_file(
     # se dopočítaný tep propsal do records.heart_rate a odtud do všech
     # tepových analytik.
     hr_series = pd.Series(
-        [_safe_int(r.get("heart_rate")) for r in raw_records], dtype="float64"
+        [_plausible_hr(_safe_int(r.get("heart_rate"))) for r in raw_records], dtype="float64"
     )
     hr_effective = [
         int(v) if v == v else None  # NaN != NaN
@@ -577,7 +600,7 @@ def parse_fit_file(
         ts_dt: Optional[datetime] = raw.get("timestamp")
         seg_s = segs[idx]
 
-        hr   = _safe_int(raw.get("heart_rate"))   # naměřený – jde do CSV a avg_hr
+        hr   = _plausible_hr(_safe_int(raw.get("heart_rate")))  # naměřený – jde do CSV a avg_hr
         hr_eff = hr_effective[idx]                # s doplněnými mezerami – jen pro zóny a TRIMP
         spd  = speeds[idx]
         dist = _safe_float(raw.get("distance"))

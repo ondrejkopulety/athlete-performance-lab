@@ -13,51 +13,38 @@ Funkce:
   - Logging do souboru i konzole
 """
 
+import logging
 import os
 import re
 import sys
 import time
-import logging
-import requests
 from pathlib import Path
+
+import requests
 from dotenv import load_dotenv
 from stravalib.client import Client
+
+from src.ingestion.strava_auth import StravaAuthError, refresh_access_token
 
 # Načte proměnné z .env souboru (přepíše případné env proměnné shellu)
 load_dotenv(override=False)
 
+
 # ---------------------------------------------------------------------------
 # KONFIGURACE
 # ---------------------------------------------------------------------------
-def _require_env_int(key: str) -> int:
-    """Načte env proměnnou a převede ji na int; selže srozumitelnou chybou."""
-    raw = os.environ.get(key, "").strip()
+# OAuth (client_id/secret/refresh_token) řeší src.ingestion.strava_auth –
+# tady zbývá jen session cookie na stažení RAW souborů. Čte se AŽ ve funkci,
+# ne při importu, aby `import strava_client` nespadl bez .env.
+def _session_cookie() -> str:
+    raw = os.environ.get("STRAVA_SESSION_COOKIE", "").strip()
     if not raw:
-        raise EnvironmentError(
-            f"Chybí povinná proměnná prostředí '{key}'. Zkontroluj .env soubor."
-        )
-    try:
-        return int(raw)
-    except ValueError:
-        raise EnvironmentError(
-            f"Proměnná '{key}' musí být celé číslo, ale obsahuje: {raw!r}"
-        )
-
-
-def _require_env_str(key: str) -> str:
-    """Načte env proměnnou jako string; selže srozumitelnou chybou pokud chybí."""
-    raw = os.environ.get(key, "").strip()
-    if not raw:
-        raise EnvironmentError(
-            f"Chybí povinná proměnná prostředí '{key}'. Zkontroluj .env soubor."
+        raise StravaAuthError(
+            "Chybí STRAVA_SESSION_COOKIE v .env – potřeba pro stažení originálních souborů."
         )
     return raw
 
 
-CLIENT_ID: int = _require_env_int("STRAVA_CLIENT_ID")
-CLIENT_SECRET: str = _require_env_str("STRAVA_CLIENT_SECRET")
-REFRESH_TOKEN: str = _require_env_str("STRAVA_REFRESH_TOKEN")
-SESSION_COOKIE: str = _require_env_str("STRAVA_SESSION_COOKIE")
 DOWNLOAD_DIR = "data/fit/strava_originals"
 LOG_FILE = "logs/export_debug.log"
 
@@ -144,32 +131,6 @@ rate_limiter = RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, SLEEP_RATE_LIMIT_P
 # INICIALIZACE KLIENTA
 # ---------------------------------------------------------------------------
 client = Client()
-
-
-def refresh_access_token() -> str:
-    """Obnoví přístupový token přes OAuth2 refresh flow."""
-    # --- Sanity Check ---
-    secret_preview = CLIENT_SECRET[:4] + "***" if len(CLIENT_SECRET) > 4 else "***"
-    token_preview = REFRESH_TOKEN[:4] + "***" if len(REFRESH_TOKEN) > 4 else "***"
-    logger.info(
-        "Ověřuji konfiguraci: ID=%d, Secret=%s, Token=%s",
-        CLIENT_ID,
-        secret_preview,
-        token_preview,
-    )
-
-    logger.info("Obnovuji přístupový token...")
-    try:
-        response = client.refresh_access_token(
-            client_id=CLIENT_ID,
-            client_secret=CLIENT_SECRET,
-            refresh_token=REFRESH_TOKEN,
-        )
-        logger.info("Token úspěšně obnoven.")
-        return response["access_token"]
-    except Exception as e:
-        logger.error("Nepodařilo se obnovit token: %s", e)
-        raise
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +339,7 @@ def _find_existing_file(base_path_no_ext: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def main():
+    session_cookie = _session_cookie()
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     logger.info("=" * 60)
     logger.info("Strava Original Export – START")
@@ -435,7 +397,7 @@ def main():
             rate_limiter.remaining,
         )
 
-        success, final_path = download_original(activity_id, SESSION_COOKIE, base_path)
+        success, final_path = download_original(activity_id, session_cookie, base_path)
 
         if success and final_path:
             size_kb = os.path.getsize(final_path) // 1024
@@ -474,7 +436,7 @@ def _connection_test():
 
     try:
         access_token = refresh_access_token()
-    except EnvironmentError as e:
+    except StravaAuthError as e:
         print(f"\n[CHYBA KONFIGURACE] {e}")
         sys.exit(1)
     except Exception as e:
@@ -482,7 +444,7 @@ def _connection_test():
         sys.exit(1)
 
     client.access_token = access_token
-    print(f"\nToken obnoven. Načítám prvních 5 aktivit...\n")
+    print("\nToken obnoven. Načítám prvních 5 aktivit...\n")
 
     try:
         activities = list(client.get_activities(limit=5))
@@ -508,8 +470,7 @@ def _connection_test():
 
 
 if __name__ == "__main__":
-    import sys as _sys
-    if len(_sys.argv) > 1 and _sys.argv[1] == "--test":
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
         _connection_test()
     else:
         main()

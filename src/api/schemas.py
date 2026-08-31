@@ -43,7 +43,7 @@ class DailyMetricsOut(BaseModel):
     polarization_low_pct: float | None = None
     polarization_high_pct: float | None = None
     z3_junk_pct: float | None = None
-    polarization_efficiency: float | None = None
+    critical_hr: float | None = None
     readiness_score: float | None = None
     pure_recovery_score: float | None = None
     hrv_last_night: float | None = None
@@ -111,6 +111,9 @@ class ActivityOut(BaseModel):
     time_in_z4: float | None = None
     time_in_z5: float | None = None
     source: str | None = None
+    # ID spárované aktivity na Stravě; None = na Stravě není. Odkaz skládá
+    # frontend (strava.com/activities/{strava_id}).
+    strava_id: str | None = None
 
 
 class ActivityDetailOut(ActivityOut):
@@ -130,7 +133,8 @@ class ActivityDetailOut(ActivityOut):
     resp_rate_rsa: float | None = None
     epoc_score: float | None = None
     time_at_threshold_min: float | None = None
-    critical_hr: float | None = None
+    # critical_hr je teď denní metrika (viz DailyMetricsOut) – jedna atletova
+    # hodnota, ne per-activity.
     tati_score: float | None = None
     # Percentilové pořadí TRIMP vůči vlastní historii kardio aktivit –
     # podklad pro verdikt/gauge, viz activity.py:compute_trimp_load_percentile.

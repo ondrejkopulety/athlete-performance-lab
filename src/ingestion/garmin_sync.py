@@ -11,19 +11,18 @@ Funkce:
     - Automatická deduplikace CSV dat na základě sloupce 'date'
 """
 
-import os
-import sys
-import json
-import csv
-import shutil
-import time
-import random
-import logging
 import io
+import json
+import logging
+import os
+import random
+import sys
+import time
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Any, Dict, List, Optional
 
 # ── Project root on sys.path for config import ────────────────────────────────
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,12 +31,12 @@ if _PROJECT_ROOT not in sys.path:
 
 import pandas as pd
 import requests.exceptions
+from dotenv import load_dotenv
 from garminconnect import (
     Garmin,
-    GarminConnectTooManyRequestsError,
     GarminConnectConnectionError,
+    GarminConnectTooManyRequestsError,
 )
-from dotenv import load_dotenv
 
 from config.settings import INITIAL_BACKFILL_DAYS
 
@@ -75,29 +74,6 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # POMOCNÉ FUNKCE
 # ============================================================================
-
-def wipe_data_directories():
-    """
-    Smaže všechny soubory ve složkách data/summaries/ a data/raw/.
-    Jedná se o čistý start pro novou synchronizaci.
-    """
-    logger.info("[INFO] Čišťuji datové adresáře...")
-    
-    for directory in [SUMMARIES_DIR, RAW_DIR]:
-        if directory.exists():
-            try:
-                shutil.rmtree(directory)
-                logger.info(f"[INFO] Smazán adresář: {directory}")
-            except Exception as e:
-                logger.warning(f"[WARN] Chyba při mazání {directory}: {e}")
-    
-    # Vytvoř adresáře znovu, aby byla připravena struktura
-    SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    FIT_DIR.mkdir(parents=True, exist_ok=True)
-    
-    logger.info("[INFO] Datové adresáře jsou připraveny")
-
 
 def random_sleep(min_seconds: int = 3, max_seconds: int = 6) -> None:
     """Náhodná pauza mezi požadavky, aby nás Garmin nezablokoval."""
@@ -364,10 +340,10 @@ def save_raw_response(category: str, endpoint: str, response: Any) -> None:
     try:
         raw_dir = Path("data/raw")
         raw_dir.mkdir(parents=True, exist_ok=True)
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = raw_dir / f"{category}_{timestamp}.json"
-        
+
         with open(filename, "w", encoding="utf-8") as f:
             json.dump({
                 "timestamp": timestamp,
@@ -375,7 +351,7 @@ def save_raw_response(category: str, endpoint: str, response: Any) -> None:
                 "response": response,
                 "response_type": type(response).__name__,
             }, f, indent=2, default=str)
-        
+
         logger.debug(f"[DEBUG] Raw response saved: {filename}")
     except Exception as e:
         logger.debug(f"[DEBUG] Failed to save raw response: {str(e)[:50]}")
@@ -396,22 +372,22 @@ def find_value_recursive(obj: Any, key_pattern: str, depth: int = 0, max_depth: 
     """
     results = []
     key_pattern_lower = key_pattern.lower()
-    
+
     if depth > max_depth:
         return results
-    
+
     if isinstance(obj, dict):
         for key, value in obj.items():
             if key.lower() == key_pattern_lower or key_pattern_lower in key.lower():
                 results.append(value)
-            
+
             if isinstance(value, (dict, list)):
                 results.extend(find_value_recursive(value, key_pattern, depth + 1, max_depth))
-    
+
     elif isinstance(obj, list):
         for item in obj:
             results.extend(find_value_recursive(item, key_pattern, depth + 1, max_depth))
-    
+
     return results
 
 
@@ -615,73 +591,100 @@ def sync_activities(
         logger.error(f"[ERROR] Chyba při synchronizaci aktivit: {e}")
 
 
-def sync_hrv(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
-    """
-    Synchronizuje HRV data pomocí garmin_obj.get_hrv_data(date_str).
+def _daily_range(start_date: str, end_date: str):
+    """Vydává 'YYYY-MM-DD' od start do end včetně."""
+    current = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    while current <= end:
+        yield current.strftime("%Y-%m-%d")
+        current += timedelta(days=1)
 
-    Args:
-        garmin_obj: Přihlášený objekt Garmin
-        start_date: Počáteční datum (YYYY-MM-DD)
-        end_date: Konečné datum (YYYY-MM-DD)
-    """
-    logger.info(f"[INFO] Synchronizuji HRV pro datumový rozsah {start_date} až {end_date}...")
 
+def sync_daily_metric(
+    garmin_obj: Garmin,
+    start_date: str,
+    end_date: str,
+    *,
+    label: str,
+    csv_key: str,
+    fetch: Callable[[Garmin, str], Any],
+    parse: Callable[[Any, str], Optional[dict]],
+    per_day_error_level: int = logging.WARNING,
+) -> None:
+    """
+    Sdílený skelet pro denní Garmin metriky: smyčka přes dny → ``fetch`` →
+    ``parse`` → CSV. Odstraňuje ~30 řádků boilerplate na metriku a hlavně
+    sjednocuje ošetření rate-limitu (částečný zápis + propagace 429).
+
+    ``fetch(garmin_obj, date_str)`` volá API (smí vyhodit Garmin* výjimky),
+    ``parse(response, date_str)`` vrátí řádek do CSV nebo ``None`` (den se
+    přeskočí). Metriky s vlastní odchylkou (VO2 s 30denním fallbackem,
+    tepová frekvence se dvěma výstupy, aktivity s FIT soubory) tenhle skelet
+    nepoužívají.
+    """
+    logger.info(f"[INFO] Synchronizuji {label} pro datumový rozsah {start_date} až {end_date}...")
+
+    rows: list[dict] = []
     try:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        hrv_data = []
-
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-
+        for date_str in _daily_range(start_date, end_date):
             try:
-                hrv_response = polite_api_call(
-                    garmin_obj.get_hrv_data, date_str, metric_name="HRV"
-                )
-
-                if hrv_response and isinstance(hrv_response, dict):
-                    hrv_summary = hrv_response.get("hrvSummary", {})
-                    hrv_readings = hrv_response.get("hrvReadings", [])
-
-                    # HRV má smysluplná data, pokud je seznam HRV odečtů nebo máme summary
-                    if hrv_readings or (isinstance(hrv_summary, dict) and hrv_summary.get("lastNightAvg")):
-                        hrv_data.append({
-                            "date": date_str,
-                            "weekly_avg": hrv_summary.get("weeklyAvg", 0),
-                            "last_night_avg": hrv_summary.get("lastNightAvg", 0),
-                            "last_night_5min_high": hrv_summary.get("lastNight5MinHigh", 0),
-                            "status": hrv_summary.get("status", ""),
-                            "feedback_text": hrv_summary.get("feedbackPhrase", ""),
-                            "sample_count": len(hrv_readings),
-                        })
-                        logger.info(f"[INFO] Synchronizuji HRV pro datum {date_str}")
-
+                response = fetch(garmin_obj, date_str)
+                row = parse(response, date_str)
+                if row is not None:
+                    rows.append(row)
+                    logger.info(f"[INFO] Synchronizuji {label} pro datum {date_str}")
                 random_sleep()
             except GarminNotFoundError:
-                logger.debug(f"[DEBUG] HRV data pro {date_str}: 404, přeskakuji den")
+                logger.debug(f"[DEBUG] {label} pro {date_str}: 404, přeskakuji den")
             except GarminRateLimitError:
                 logger.warning(
-                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky HRV. "
-                    f"Uloženo {len(hrv_data)} záznamů. Ukončuji skript."
+                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky {label}. "
+                    f"Uloženo {len(rows)} záznamů. Ukončuji skript."
                 )
-                if hrv_data:
-                    append_or_update_csv(CSV_FILES["hrv"], hrv_data)
+                if rows:
+                    append_or_update_csv(CSV_FILES[csv_key], rows)
                 raise
             except Exception as e:
-                logger.warning(f"[WARN] Chyba při stahování HRV pro {date_str}: {str(e)[:50]}")
+                logger.log(per_day_error_level, f"[WARN] Chyba při synchronizaci {label} pro {date_str}: {str(e)[:100]}")
 
-            current_date += timedelta(days=1)
-
-        if hrv_data:
-            append_or_update_csv(CSV_FILES["hrv"], hrv_data)
-            logger.info(f"[INFO] Synchronizovány HRV data: {len(hrv_data)} záznamů")
+        if rows:
+            append_or_update_csv(CSV_FILES[csv_key], rows)
+            logger.info(f"[INFO] Synchronizovány {label} data: {len(rows)} záznamů")
         else:
-            logger.info("[INFO] Žádná HRV data k synchronizaci")
+            logger.info(f"[INFO] {label}: bez dostupných dat v API")
 
     except GarminRateLimitError:
         raise
     except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci HRV: {e}")
+        logger.error(f"[ERROR] Chyba při synchronizaci {label}: {e}")
+
+
+def _parse_hrv(resp: Any, date_str: str) -> Optional[dict]:
+    if not (resp and isinstance(resp, dict)):
+        return None
+    summary = resp.get("hrvSummary", {})
+    readings = resp.get("hrvReadings", [])
+    if not (readings or (isinstance(summary, dict) and summary.get("lastNightAvg"))):
+        return None
+    return {
+        "date": date_str,
+        "weekly_avg": summary.get("weeklyAvg", 0),
+        "last_night_avg": summary.get("lastNightAvg", 0),
+        "last_night_5min_high": summary.get("lastNight5MinHigh", 0),
+        "status": summary.get("status", ""),
+        "feedback_text": summary.get("feedbackPhrase", ""),
+        "sample_count": len(readings),
+    }
+
+
+def sync_hrv(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
+    """HRV data (garmin_obj.get_hrv_data)."""
+    sync_daily_metric(
+        garmin_obj, start_date, end_date,
+        label="HRV", csv_key="hrv",
+        fetch=lambda g, d: polite_api_call(g.get_hrv_data, d, metric_name="HRV"),
+        parse=_parse_hrv,
+    )
 
 
 def sync_vo2_max(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
@@ -792,673 +795,127 @@ def sync_vo2_max(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         logger.error(f"[ERROR] Chyba při synchronizaci VO2 Max: {e}")
 
 
+def _parse_sleep(resp: Any, date_str: str) -> Optional[dict]:
+    if not (resp and "dailySleepDTO" in resp):
+        return None
+    daily_sleep = resp["dailySleepDTO"]
+    sleep_scores = daily_sleep.get("sleepScores", {})
+    sleep_score = 0
+    if isinstance(sleep_scores, dict) and "overall" in sleep_scores:
+        sleep_score = sleep_scores["overall"].get("value", 0)
+    sleep_time_seconds = daily_sleep.get("sleepTimeSeconds", 0)
+    duration_minutes = sleep_time_seconds // 60 if sleep_time_seconds else 0
+    if not (sleep_score > 0 or duration_minutes > 0):
+        return None
+    return {
+        "date": date_str,
+        "sleep_score": sleep_score,
+        "duration_minutes": duration_minutes,
+        "sleep_start_time": daily_sleep.get("sleepStartTimestampGMT", ""),
+        "sleep_end_time": daily_sleep.get("sleepEndTimestampGMT", ""),
+        "rem_sleep_percentage": sleep_scores.get("remPercentage", {}).get("value", 0),
+        "light_sleep_percentage": sleep_scores.get("lightPercentage", {}).get("value", 0),
+        "deep_sleep_percentage": sleep_scores.get("deepPercentage", {}).get("value", 0),
+        "awake_count": daily_sleep.get("awakeCount", 0),
+        "avg_spo2": daily_sleep.get("averageSpO2Value", 0),
+        "avg_respiration": daily_sleep.get("averageRespirationValue", 0),
+    }
+
+
 def sync_sleep(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
-    """
-    Synchronizuje spánková data pomocí garmin_obj.get_sleep_data(date_str).
+    """Spánková data (garmin_obj.get_sleep_data); sleep_score = sleepScores['overall']['value']."""
+    sync_daily_metric(
+        garmin_obj, start_date, end_date,
+        label="SPÁNEK", csv_key="sleep",
+        fetch=lambda g, d: polite_api_call(g.get_sleep_data, d, metric_name="SPÁNEK"),
+        parse=_parse_sleep,
+    )
 
-    Mapuje quality_score na sleepScores['overall']['value'].
 
-    Args:
-        garmin_obj: Přihlášený objekt Garmin
-        start_date: Počáteční datum (YYYY-MM-DD)
-        end_date: Konečné datum (YYYY-MM-DD)
-    """
-    logger.info(f"[INFO] Synchronizuji SPÁNEK pro datumový rozsah {start_date} až {end_date}...")
-    
-    try:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        sleep_data = []
-        
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-            
-            try:
-                sleep_response = polite_api_call(
-                    garmin_obj.get_sleep_data, date_str, metric_name="SPÁNEK"
-                )
-                
-                if sleep_response and "dailySleepDTO" in sleep_response:
-                    daily_sleep = sleep_response["dailySleepDTO"]
-                    
-                    # Mapuj sleep_score z sleepScores['overall']['value']
-                    sleep_scores = daily_sleep.get("sleepScores", {})
-                    sleep_score = 0
-                    if isinstance(sleep_scores, dict) and "overall" in sleep_scores:
-                        sleep_score = sleep_scores["overall"].get("value", 0)
-                    
-                    # Zkontroluj, zda máme nějaká data
-                    sleep_time_seconds = daily_sleep.get("sleepTimeSeconds", 0)
-                    duration_minutes = sleep_time_seconds // 60 if sleep_time_seconds else 0
-                    
-                    if sleep_score > 0 or duration_minutes > 0:
-                        sleep_data.append({
-                            "date": date_str,
-                            "sleep_score": sleep_score,
-                            "duration_minutes": duration_minutes,
-                            "sleep_start_time": daily_sleep.get("sleepStartTimestampGMT", ""),
-                            "sleep_end_time": daily_sleep.get("sleepEndTimestampGMT", ""),
-                            "rem_sleep_percentage": sleep_scores.get("remPercentage", {}).get("value", 0),
-                            "light_sleep_percentage": sleep_scores.get("lightPercentage", {}).get("value", 0),
-                            "deep_sleep_percentage": sleep_scores.get("deepPercentage", {}).get("value", 0),
-                            "awake_count": daily_sleep.get("awakeCount", 0),
-                            "avg_spo2": daily_sleep.get("averageSpO2Value", 0),
-                            "avg_respiration": daily_sleep.get("averageRespirationValue", 0),
-                        })
-                        logger.info(f"[INFO] Synchronizuji SPÁNEK pro datum {date_str}")
-                
-                random_sleep()
-            except GarminNotFoundError:
-                logger.debug(f"[DEBUG] Spánek pro {date_str}: 404, přeskakuji den")
-            except GarminRateLimitError:
-                logger.warning(
-                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky SPÁNEK. "
-                    f"Uloženo {len(sleep_data)} záznamů. Ukončuji skript."
-                )
-                if sleep_data:
-                    append_or_update_csv(CSV_FILES["sleep"], sleep_data)
-                raise
-            except Exception as e:
-                logger.warning(f"[WARN] Chyba při stahování spánkových dat pro {date_str}: {e}")
-            
-            current_date += timedelta(days=1)
-        
-        if sleep_data:
-            append_or_update_csv(CSV_FILES["sleep"], sleep_data)
-            logger.info(f"[INFO] Synchronizovány SPÁNEK data: {len(sleep_data)} záznamů")
-        else:
-            logger.info("[INFO] Žádná spánková data k synchronizaci")
-    
-    except GarminRateLimitError:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci spánku: {e}")
+def _parse_daily_health(resp: Any, date_str: str) -> Optional[dict]:
+    if not (resp and isinstance(resp, dict)):
+        return None
+    bb_highest = resp.get("bodyBatteryHighestValue", 0)
+    bb_lowest = resp.get("bodyBatteryLowestValue", 0)
+    stress_avg = resp.get("averageStressLevel", 0)
+    stress_max = resp.get("maxStressLevel", 0)
+    rhr = resp.get("restingHeartRate", 0)
+    if not (bb_highest or bb_lowest or stress_avg or stress_max or rhr):
+        return None
+    return {
+        "date": date_str,
+        "body_battery_highest": bb_highest,
+        "body_battery_lowest": bb_lowest,
+        "stress_average": stress_avg,
+        "stress_max": stress_max,
+        "resting_heart_rate": rhr,
+    }
 
 
 def sync_daily_health(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
-    """
-    Synchronizuje Daily Health data pomocí garmin_obj.get_user_summary(date_str).
+    """Body Battery / stres / klidový tep (garmin_obj.get_user_summary)."""
+    sync_daily_metric(
+        garmin_obj, start_date, end_date,
+        label="DAILY HEALTH", csv_key="daily_health",
+        fetch=lambda g, d: polite_api_call(g.get_user_summary, d, metric_name="DAILY HEALTH"),
+        parse=_parse_daily_health,
+        per_day_error_level=logging.DEBUG,
+    )
 
-    Extrahuje:
-    - Body Battery: bodyBatteryHighestValue, bodyBatteryLowestValue
-    - Stress: averageStressLevel, maxStressLevel
-    - Resting HR: restingHeartRate
 
-    Args:
-        garmin_obj: Přihlášený objekt Garmin
-        start_date: Počáteční datum (YYYY-MM-DD)
-        end_date: Konečné datum (YYYY-MM-DD)
-    """
-    logger.info(f"[INFO] Synchronizuji DAILY HEALTH pro datumový rozsah {start_date} až {end_date}...")
-
-    try:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        health_data = []
-
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-
+def _fetch_training_readiness(garmin_obj: Garmin, date_str: str) -> Any:
+    resp = polite_api_call(
+        garmin_obj.get_training_readiness, date_str, metric_name="TRAINING READINESS"
+    )
+    # Fallback: prázdná odpověď → zkus endpoint s display_name
+    if not resp:
+        display_name = getattr(garmin_obj, "display_name", None)
+        if display_name:
             try:
-                health_response = polite_api_call(
-                    garmin_obj.get_user_summary, date_str, metric_name="DAILY HEALTH"
+                resp = garmin_obj.connectapi(
+                    f"/metrics-service/metrics/trainingreadiness/{date_str}",
+                    params={"displayName": display_name},
                 )
+            except Exception:
+                pass
+    if resp:
+        save_raw_response(f"training_readiness_{date_str}", "get_training_readiness", resp)
+    return resp
 
-                if health_response and isinstance(health_response, dict):
-                    bb_highest = health_response.get("bodyBatteryHighestValue", 0)
-                    bb_lowest = health_response.get("bodyBatteryLowestValue", 0)
-                    stress_avg = health_response.get("averageStressLevel", 0)
-                    stress_max = health_response.get("maxStressLevel", 0)
-                    rhr = health_response.get("restingHeartRate", 0)
 
-                    if bb_highest or bb_lowest or stress_avg or stress_max or rhr:
-                        health_data.append({
-                            "date": date_str,
-                            "body_battery_highest": bb_highest,
-                            "body_battery_lowest": bb_lowest,
-                            "stress_average": stress_avg,
-                            "stress_max": stress_max,
-                            "resting_heart_rate": rhr,
-                        })
-                        logger.info(f"[INFO] Synchronizuji DAILY HEALTH pro datum {date_str}")
-                    else:
-                        logger.debug(f"[DEBUG] Žádná Daily Health data pro datum {date_str}")
-                else:
-                    logger.debug(f"[DEBUG] Žádná Daily Health data pro datum {date_str}")
-
-                random_sleep()
-            except GarminNotFoundError:
-                logger.debug(f"[DEBUG] Daily Health pro {date_str}: 404, přeskakuji den")
-            except GarminRateLimitError:
-                logger.warning(
-                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky DAILY HEALTH. "
-                    f"Uloženo {len(health_data)} záznamů. Ukončuji skript."
-                )
-                if health_data:
-                    append_or_update_csv(CSV_FILES["daily_health"], health_data)
-                raise
-            except Exception as e:
-                logger.debug(f"[DEBUG] Chyba při Daily Health pro {date_str}: {str(e)[:50]}")
-
-            current_date += timedelta(days=1)
-
-        if health_data:
-            append_or_update_csv(CSV_FILES["daily_health"], health_data)
-            logger.info(f"[INFO] Synchronizovány DAILY HEALTH data: {len(health_data)} záznamů")
-        else:
-            logger.info("[INFO] Daily Health: bez dostupných dat v API")
-
-    except GarminRateLimitError:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci daily health: {e}")
+def _parse_training_readiness(resp: Any, date_str: str) -> Optional[dict]:
+    if isinstance(resp, list) and resp:
+        record = resp[0]
+    elif isinstance(resp, dict):
+        record = resp
+    else:
+        return None
+    if not isinstance(record, dict):
+        return None
+    score = record.get("score", 0)
+    recovery_time = record.get("recoveryTime", 0)
+    sleep_score = record.get("sleepScore", 0)
+    hrv_factor_percent = record.get("hrvFactorPercent", 0)
+    if not (score or recovery_time or sleep_score or hrv_factor_percent):
+        return None
+    return {
+        "date": date_str,
+        "score": score,
+        "recovery_time": recovery_time,
+        "sleep_score": sleep_score,
+        "hrv_factor_percent": hrv_factor_percent,
+    }
 
 
 def sync_training_readiness(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
-    """
-    Synchronizuje Training Readiness data pomocí garmin_obj.get_training_readiness(date_str).
-
-    Extrahuje pole: score, recoveryTime, sleepScore, hrvFactorPercent.
-    Ukládá raw JSON odpovědi pro debugging.
-
-    Args:
-        garmin_obj: Přihlášený objekt Garmin
-        start_date: Počáteční datum (YYYY-MM-DD)
-        end_date: Konečné datum (YYYY-MM-DD)
-    """
-    logger.info(f"[INFO] Synchronizuji TRAINING READINESS pro datumový rozsah {start_date} až {end_date}...")
-
-    try:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        readiness_data = []
-
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-
-            try:
-                readiness_response = polite_api_call(
-                    garmin_obj.get_training_readiness, date_str,
-                    metric_name="TRAINING READINESS"
-                )
-
-                # Fallback: pokud je odpověď prázdná, zkus endpoint s display_name
-                if not readiness_response:
-                    display_name = getattr(garmin_obj, "display_name", None)
-                    if display_name:
-                        try:
-                            readiness_response = garmin_obj.connectapi(
-                                f"/metrics-service/metrics/trainingreadiness/{date_str}",
-                                params={"displayName": display_name}
-                            )
-                        except Exception:
-                            pass
-
-                if readiness_response:
-                    save_raw_response(f"training_readiness_{date_str}", "get_training_readiness", readiness_response)
-
-                # Odpověď může být seznam nebo slovník
-                if isinstance(readiness_response, list) and readiness_response:
-                    record = readiness_response[0]
-                elif isinstance(readiness_response, dict):
-                    record = readiness_response
-                else:
-                    record = None
-
-                if record and isinstance(record, dict):
-                    score = record.get("score", 0)
-                    recovery_time = record.get("recoveryTime", 0)
-                    sleep_score = record.get("sleepScore", 0)
-                    hrv_factor_percent = record.get("hrvFactorPercent", 0)
-
-                    if score or recovery_time or sleep_score or hrv_factor_percent:
-                        readiness_data.append({
-                            "date": date_str,
-                            "score": score,
-                            "recovery_time": recovery_time,
-                            "sleep_score": sleep_score,
-                            "hrv_factor_percent": hrv_factor_percent,
-                        })
-                        logger.info(f"[INFO] Synchronizuji TRAINING READINESS pro datum {date_str}: score={score}")
-
-                random_sleep()
-            except GarminNotFoundError:
-                logger.debug(f"[DEBUG] Training Readiness pro {date_str}: 404, přeskakuji den")
-            except GarminRateLimitError:
-                logger.warning(
-                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky TRAINING READINESS. "
-                    f"Uloženo {len(readiness_data)} záznamů. Ukončuji skript."
-                )
-                if readiness_data:
-                    append_or_update_csv(CSV_FILES["training_readiness"], readiness_data)
-                raise
-            except Exception as e:
-                logger.debug(f"[DEBUG] Chyba při stahování Training Readiness pro {date_str}: {str(e)[:100]}")
-
-            current_date += timedelta(days=1)
-
-        if readiness_data:
-            append_or_update_csv(CSV_FILES["training_readiness"], readiness_data)
-            logger.info(f"[INFO] Synchronizovány TRAINING READINESS data: {len(readiness_data)} záznamů")
-        else:
-            logger.info("[INFO] Training Readiness: bez dostupných dat v API")
-
-    except GarminRateLimitError:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci training readiness: {e}")
-
-
-def sync_training_status_history(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
-    """
-    Synchronizuje historická Training Status data den po dni pomocí
-    garmin_obj.get_training_status(date_str).
-
-    Extrahuje: acuteLoad, trainingStatus, recoveryTime, vo2Max
-    z mostRecentTrainingStatus -> latestTrainingStatusData.
-
-    Args:
-        garmin_obj: Přihlášený objekt Garmin
-        start_date: Počáteční datum (YYYY-MM-DD)
-        end_date: Konečné datum (YYYY-MM-DD)
-    """
-    logger.info(f"[INFO] Synchronizuji TRAINING STATUS HISTORII pro datumový rozsah {start_date} až {end_date}...")
-
-    try:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        status_data = []
-
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-
-            try:
-                status_response = polite_api_call(
-                    garmin_obj.get_training_status, date_str,
-                    metric_name="TRAINING STATUS HISTORY"
-                )
-
-                # Fallback: pokud je odpověď prázdná, zkus endpoint s display_name
-                if not status_response:
-                    display_name = getattr(garmin_obj, "display_name", None)
-                    if display_name:
-                        try:
-                            status_response = garmin_obj.connectapi(
-                                f"/trainingstatus-service/trainingstatus/latest/{display_name}"
-                            )
-                        except Exception:
-                            pass
-
-                if status_response and isinstance(status_response, dict):
-                    most_recent = status_response.get("mostRecentTrainingStatus", {})
-                    latest_data = {}
-                    if isinstance(most_recent, dict):
-                        latest_data = most_recent.get("latestTrainingStatusData", {})
-                        if not isinstance(latest_data, dict):
-                            latest_data = {}
-
-                    acute_load = (
-                        latest_data.get("acuteLoad")
-                        or most_recent.get("acuteLoad")
-                        or status_response.get("acuteLoad", 0)
-                    )
-                    training_status = (
-                        latest_data.get("trainingStatus")
-                        or most_recent.get("trainingStatus")
-                        or status_response.get("trainingStatus", "")
-                    )
-                    recovery_time = (
-                        latest_data.get("recoveryTime")
-                        or most_recent.get("recoveryTime")
-                        or status_response.get("recoveryTime", 0)
-                    )
-                    vo2_max = (
-                        latest_data.get("vo2Max")
-                        or most_recent.get("vo2Max")
-                        or status_response.get("vo2Max", 0)
-                    )
-
-                    status_data.append({
-                        "date": date_str,
-                        "acute_load": acute_load or 0,
-                        "training_status": training_status or "",
-                        "recovery_time": recovery_time or 0,
-                        "vo2_max": vo2_max or 0,
-                    })
-
-                random_sleep()
-            except GarminNotFoundError:
-                logger.debug(f"[DEBUG] Training Status History pro {date_str}: 404, přeskakuji den")
-            except GarminRateLimitError:
-                logger.warning(
-                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky TRAINING STATUS HISTORY. "
-                    f"Uloženo {len(status_data)} záznamů. Ukončuji skript."
-                )
-                if status_data:
-                    append_or_update_csv(CSV_FILES["training_status"], status_data)
-                raise
-            except Exception as e:
-                logger.debug(f"[DEBUG] Chyba při Training Status History pro {date_str}: {str(e)[:100]}")
-
-            current_date += timedelta(days=1)
-
-        # Odfiltruj záznamy, kde jsou všechny hodnoty nulové/prázdné
-        meaningful = [r for r in status_data if r.get("acute_load") or r.get("training_status") or r.get("recovery_time")]
-        if meaningful:
-            append_or_update_csv(CSV_FILES["training_status"], meaningful)
-            logger.info(f"[INFO] Synchronizovány TRAINING STATUS HISTORY data: {len(meaningful)} záznamů")
-        else:
-            logger.info("[INFO] Training Status History: bez smysluplných dat v API")
-
-    except GarminRateLimitError:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci training status history: {e}")
-
-
-def sync_load_focus(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
-    """
-    Synchronizuje Load Focus data - složení tréninkového zatížení
-    pomocí garminconnect get_training_status() per-day.
-
-    Extrahuje z mostRecentTrainingStatus.latestTrainingStatusData:
-    anaerobicLoad, highAerobicLoad, lowAerobicLoad, recoveryTime, vo2Max.
-
-    Args:
-        garmin_obj: Garminconnect Garmin objekt
-        start_date: Počáteční datum (YYYY-MM-DD)
-        end_date: Konečné datum (YYYY-MM-DD)
-    """
-    logger.info(f"[INFO] Synchronizuji LOAD FOCUS pro datumový rozsah {start_date} až {end_date}...")
-
-    try:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        load_data = []
-
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-
-            try:
-                status_response = polite_api_call(
-                    garmin_obj.get_training_status, date_str,
-                    metric_name="LOAD FOCUS"
-                )
-
-                if status_response and isinstance(status_response, dict):
-                    lts = {}
-                    mts = status_response.get("mostRecentTrainingStatus", {})
-                    if isinstance(mts, dict):
-                        lts = mts.get("latestTrainingStatusData", {}) or {}
-
-                    anaerobic_load = (lts.get("anaerobicLoad")
-                                      or status_response.get("anaerobicLoad", 0) or 0)
-                    high_aerobic_load = (lts.get("highAerobicLoad")
-                                         or status_response.get("highAerobicLoad", 0) or 0)
-                    low_aerobic_load = (lts.get("lowAerobicLoad")
-                                        or status_response.get("lowAerobicLoad", 0) or 0)
-                    recovery_time = (lts.get("recoveryTime")
-                                     or mts.get("recoveryTime", 0) if isinstance(mts, dict) else 0
-                                     or status_response.get("recoveryTime", 0) or 0)
-                    vo2_max = (lts.get("vo2Max")
-                               or status_response.get("vo2Max", 0) or 0)
-
-                    if any([anaerobic_load, high_aerobic_load, low_aerobic_load, recovery_time, vo2_max]):
-                        load_data.append({
-                            "date": date_str,
-                            "anaerobic_load": anaerobic_load,
-                            "high_aerobic_load": high_aerobic_load,
-                            "low_aerobic_load": low_aerobic_load,
-                            "recovery_time": recovery_time,
-                            "vo2_max": vo2_max,
-                        })
-                        logger.info(f"[INFO] Synchronizuji LOAD FOCUS pro datum {date_str}")
-
-                random_sleep()
-            except GarminNotFoundError:
-                logger.debug(f"[DEBUG] Load Focus pro {date_str}: 404, přeskakuji den")
-            except GarminRateLimitError:
-                logger.warning(
-                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky LOAD FOCUS. "
-                    f"Uloženo {len(load_data)} záznamů. Ukončuji skript."
-                )
-                if load_data:
-                    append_or_update_csv(CSV_FILES["load_focus"], load_data)
-                raise
-            except Exception as e:
-                logger.debug(f"[DEBUG] Chyba při stahování load focus pro {date_str}: {str(e)[:100]}")
-
-            current_date += timedelta(days=1)
-
-        if load_data:
-            append_or_update_csv(CSV_FILES["load_focus"], load_data)
-            logger.info(f"[INFO] Synchronizovány LOAD FOCUS data: {len(load_data)} záznamů")
-        else:
-            logger.info("[INFO] Load Focus: bez dostupných dat v API")
-
-    except GarminRateLimitError:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci load focus: {e}")
-
-
-def sync_lactate_threshold(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
-    """
-    Synchronizuje Lactate Threshold data
-    z /metrics-service/metrics/lactatethreshold/report.
-    Pokud data není k dispozici, zkus fallback na get_user_summary().
-
-    Extrahuje: lactateThresholdHeartRate, lactateThresholdSpeed.
-
-    Args:
-        garmin_obj: Garminconnect Garmin objekt
-        start_date: Počáteční datum (YYYY-MM-DD)
-        end_date: Konečné datum (YYYY-MM-DD)
-    """
-    logger.info(f"[INFO] Synchronizuji LACTATE THRESHOLD pro datumový rozsah {start_date} až {end_date}...")
-
-    try:
-        lactate_data = []
-
-        # Pokus 1: Hlavní endpoint
-        try:
-            lactate_response = polite_api_call(
-                garmin_obj.connectapi,
-                "/metrics-service/metrics/lactatethreshold/report",
-                params={}, metric_name="LACTATE THRESHOLD"
-            )
-
-            if lactate_response:
-                logger.debug(f"[DEBUG] Lactate Threshold response preview: {str(lactate_response)[:500]}")
-
-                if isinstance(lactate_response, list):
-                    for record in lactate_response:
-                        if isinstance(record, dict):
-                            record_date = record.get("date") or datetime.now().strftime("%Y-%m-%d")
-                            if isinstance(record_date, str) and len(record_date) > 10:
-                                record_date = record_date[:10]
-                            lt_heart_rate = record.get("lactateThresholdHeartRate", 0) or 0
-                            lt_speed = record.get("lactateThresholdSpeed", 0) or 0
-                            lactate_data.append({
-                                "date": record_date,
-                                "lt_heart_rate": lt_heart_rate,
-                                "lt_speed": lt_speed,
-                            })
-                elif isinstance(lactate_response, dict):
-                    record_date = lactate_response.get("date") or datetime.now().strftime("%Y-%m-%d")
-                    if isinstance(record_date, str) and len(record_date) > 10:
-                        record_date = record_date[:10]
-                    lt_heart_rate = lactate_response.get("lactateThresholdHeartRate", 0) or 0
-                    lt_speed = lactate_response.get("lactateThresholdSpeed", 0) or 0
-                    if lt_heart_rate or lt_speed:
-                        lactate_data.append({
-                            "date": record_date,
-                            "lt_heart_rate": lt_heart_rate,
-                            "lt_speed": lt_speed,
-                        })
-        except GarminNotFoundError:
-            logger.info(
-                "[INFO] Metrika LACTATE THRESHOLD nenalezena (Chyba 404) "
-                "- pravděpodobně chybí data pro tento účet. Přeskakuji..."
-            )
-        except GarminRateLimitError:
-            logger.warning(
-                f"[RATE LIMIT] Garmin API nás odřízlo u metriky LACTATE THRESHOLD. "
-                f"Uloženo {len(lactate_data)} záznamů. Ukončuji skript."
-            )
-            if lactate_data:
-                append_or_update_csv(CSV_FILES["lactate_threshold"], lactate_data)
-            raise
-        except Exception as e:
-            logger.debug(f"[DEBUG] Lactate primary endpoint failed: {str(e)[:100]}")
-
-        # Pokus 2: Fallback na get_user_summary() pokud hlavní vrátí prázdné data
-        if not lactate_data:
-            logger.debug("[DEBUG] Zkouším fallback na get_user_summary() pro lactate threshold")
-            current_date = datetime.strptime(start_date, "%Y-%m-%d")
-            end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-
-            while current_date <= end_date_obj and len(lactate_data) < 8:
-                date_str = current_date.strftime("%Y-%m-%d")
-                try:
-                    daily_response = polite_api_call(
-                        garmin_obj.get_user_summary, date_str,
-                        metric_name="LACTATE THRESHOLD (fallback)"
-                    )
-                    if daily_response and isinstance(daily_response, dict):
-                        lt_hr = daily_response.get("lactateThresholdHeartRate", 0) or 0
-                        lt_sp = daily_response.get("lactateThresholdSpeed", 0) or 0
-                        if lt_hr or lt_sp:
-                            lactate_data.append({
-                                "date": date_str,
-                                "lt_heart_rate": lt_hr,
-                                "lt_speed": lt_sp,
-                            })
-                    random_sleep()
-                except GarminNotFoundError:
-                    logger.debug(f"[DEBUG] Lactate fallback pro {date_str}: 404, přeskakuji den")
-                except GarminRateLimitError:
-                    logger.warning(
-                        f"[RATE LIMIT] Garmin API nás odřízlo u metriky LACTATE THRESHOLD (fallback). "
-                        f"Uloženo {len(lactate_data)} záznamů. Ukončuji skript."
-                    )
-                    if lactate_data:
-                        append_or_update_csv(CSV_FILES["lactate_threshold"], lactate_data)
-                    raise
-                except Exception as e:
-                    logger.debug(f"[DEBUG] Chyba při fallback lactate {date_str}: {str(e)[:50]}")
-
-                current_date += timedelta(days=1)
-
-        if lactate_data:
-            append_or_update_csv(CSV_FILES["lactate_threshold"], lactate_data)
-            logger.info(f"[INFO] Synchronizovány LACTATE THRESHOLD data: {len(lactate_data)} záznamů")
-        else:
-            logger.info("[INFO] Lactate Threshold: bez dostupných dat v API")
-
-        random_sleep()
-
-    except GarminRateLimitError:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci lactate threshold: {e}")
-
-
-def sync_training_status(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
-    """
-    [KEY FIX] Synchronizuje Training Status data pomocí garminconnect get_training_status().
-
-    Iteruje každý den v rozsahu, volá get_training_status(date_str) a extrahuje
-    z mostRecentTrainingStatus.latestTrainingStatusData:
-    trainingStatus, acuteLoad, recoveryTime, loadFocus.
-
-    Args:
-        garmin_obj: Garminconnect Garmin objekt
-        start_date: Počáteční datum (YYYY-MM-DD)
-        end_date: Konečné datum (YYYY-MM-DD)
-    """
-    logger.info(f"[INFO] Synchronizuji TRAINING STATUS pro datumový rozsah {start_date} až {end_date}...")
-
-    try:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        status_data = []
-
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-
-            try:
-                status_response = polite_api_call(
-                    garmin_obj.get_training_status, date_str,
-                    metric_name="TRAINING STATUS"
-                )
-
-                # Fallback: pokud je odpověď prázdná, zkus endpoint s display_name
-                if not status_response:
-                    display_name = getattr(garmin_obj, "display_name", None)
-                    if display_name:
-                        try:
-                            status_response = garmin_obj.connectapi(
-                                f"/trainingstatus-service/trainingstatus/latest/{display_name}"
-                            )
-                        except GarminRateLimitError:
-                            raise
-                        except Exception:
-                            pass
-
-                if status_response and isinstance(status_response, dict):
-                    mts = status_response.get("mostRecentTrainingStatus", {}) or {}
-                    lts = mts.get("latestTrainingStatusData", {}) or {} if isinstance(mts, dict) else {}
-
-                    training_status = (lts.get("trainingStatus")
-                                       or mts.get("trainingStatus") if isinstance(mts, dict) else None
-                                       or status_response.get("trainingStatus", "") or "")
-                    acute_load = (lts.get("acuteLoad")
-                                  or mts.get("acuteLoad") if isinstance(mts, dict) else None
-                                  or status_response.get("acuteLoad", 0) or 0)
-                    recovery_time = (lts.get("recoveryTime")
-                                     or mts.get("recoveryTime") if isinstance(mts, dict) else None
-                                     or status_response.get("recoveryTime", 0) or 0)
-                    load_focus = (lts.get("loadFocus")
-                                  or mts.get("loadFocus") if isinstance(mts, dict) else None
-                                  or status_response.get("loadFocus", "") or "")
-
-                    if training_status or acute_load or recovery_time:
-                        status_data.append({
-                            "date": date_str,
-                            "training_status": training_status,
-                            "acute_load": acute_load,
-                            "recovery_time": recovery_time,
-                            "load_focus": load_focus,
-                        })
-                        logger.info(f"[INFO] Synchronizuji TRAINING STATUS pro datum {date_str}")
-
-                random_sleep()
-            except GarminNotFoundError:
-                logger.debug(f"[DEBUG] Training Status pro {date_str}: 404, přeskakuji den")
-            except GarminRateLimitError:
-                logger.warning(
-                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky TRAINING STATUS. "
-                    f"Uloženo {len(status_data)} záznamů. Ukončuji skript."
-                )
-                if status_data:
-                    append_or_update_csv(CSV_FILES["training_status"], status_data)
-                raise
-            except Exception as e:
-                logger.debug(f"[DEBUG] Chyba při stahování training status pro {date_str}: {str(e)[:100]}")
-
-            current_date += timedelta(days=1)
-
-        if status_data:
-            append_or_update_csv(CSV_FILES["training_status"], status_data)
-            logger.info(f"[INFO] Synchronizovány TRAINING STATUS data: {len(status_data)} záznamů")
-        else:
-            logger.info("[INFO] Training Status: bez dostupných dat v API")
-
-    except GarminRateLimitError:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci training status: {e}")
+    """Training Readiness (score/recoveryTime/sleepScore/hrvFactorPercent)."""
+    sync_daily_metric(
+        garmin_obj, start_date, end_date,
+        label="TRAINING READINESS", csv_key="training_readiness",
+        fetch=_fetch_training_readiness,
+        parse=_parse_training_readiness,
+        per_day_error_level=logging.DEBUG,
+    )
 
 
 def sync_movement(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
@@ -1476,60 +933,24 @@ def sync_movement(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         start_date: Počáteční datum (YYYY-MM-DD)
         end_date: Konečné datum (YYYY-MM-DD)
     """
-    logger.info(f"[INFO] Synchronizuji POHYB pro datumový rozsah {start_date} až {end_date}...")
+    sync_daily_metric(
+        garmin_obj, start_date, end_date,
+        label="POHYB", csv_key="movement",
+        fetch=lambda g, d: polite_api_call(g.get_user_summary, d, metric_name="POHYB"),
+        parse=_parse_movement,
+        per_day_error_level=logging.DEBUG,
+    )
 
-    try:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        movement_data = []
 
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-
-            try:
-                movement_response = polite_api_call(
-                    garmin_obj.get_user_summary, date_str, metric_name="POHYB"
-                )
-
-                if movement_response and isinstance(movement_response, dict):
-                    total_steps = movement_response.get("totalSteps", 0)
-                    steps_goal = movement_response.get("stepsGoal", 0)
-                    floors_ascended = movement_response.get("floorsAscended", 0)
-
-                    movement_data.append({
-                        "date": date_str,
-                        "steps": total_steps,
-                        "steps_goal": steps_goal,
-                        "floors_ascended": floors_ascended,
-                    })
-                    logger.info(f"[INFO] Synchronizuji POHYB pro datum {date_str}")
-
-                random_sleep()
-            except GarminNotFoundError:
-                logger.debug(f"[DEBUG] Pohyb pro {date_str}: 404, přeskakuji den")
-            except GarminRateLimitError:
-                logger.warning(
-                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky POHYB. "
-                    f"Uloženo {len(movement_data)} záznamů. Ukončuji skript."
-                )
-                if movement_data:
-                    append_or_update_csv(CSV_FILES["movement"], movement_data)
-                raise
-            except Exception as e:
-                logger.debug(f"[DEBUG] Chyba při stahování pohybových dat pro {date_str}: {str(e)[:50]}")
-
-            current_date += timedelta(days=1)
-
-        if movement_data:
-            append_or_update_csv(CSV_FILES["movement"], movement_data)
-            logger.info(f"[INFO] Synchronizovány POHYB data: {len(movement_data)} záznamů")
-        else:
-            logger.info("[INFO] Pohyb: bez dostupných dat v API")
-
-    except GarminRateLimitError:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci pohybu: {e}")
+def _parse_movement(resp: Any, date_str: str) -> Optional[dict]:
+    if not (resp and isinstance(resp, dict)):
+        return None
+    return {
+        "date": date_str,
+        "steps": resp.get("totalSteps", 0),
+        "steps_goal": resp.get("stepsGoal", 0),
+        "floors_ascended": resp.get("floorsAscended", 0),
+    }
 
 
 def sync_intensity(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
@@ -1547,60 +968,26 @@ def sync_intensity(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
         start_date: Počáteční datum (YYYY-MM-DD)
         end_date: Konečné datum (YYYY-MM-DD)
     """
-    logger.info(f"[INFO] Synchronizuji INTENZITU pro datumový rozsah {start_date} až {end_date}...")
+    sync_daily_metric(
+        garmin_obj, start_date, end_date,
+        label="INTENZITA", csv_key="intensity",
+        fetch=lambda g, d: polite_api_call(g.get_user_summary, d, metric_name="INTENZITA"),
+        parse=_parse_intensity,
+        per_day_error_level=logging.DEBUG,
+    )
 
-    try:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        intensity_data = []
 
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-
-            try:
-                intensity_response = polite_api_call(
-                    garmin_obj.get_user_summary, date_str, metric_name="INTENZITA"
-                )
-
-                if intensity_response and isinstance(intensity_response, dict):
-                    moderate_min = intensity_response.get("moderateIntensityMinutes", 0)
-                    vigorous_min = intensity_response.get("vigorousIntensityMinutes", 0)
-                    total_intensity_min = moderate_min + vigorous_min
-
-                    intensity_data.append({
-                        "date": date_str,
-                        "moderate_min": moderate_min,
-                        "vigorous_min": vigorous_min,
-                        "total_intensity_min": total_intensity_min,
-                    })
-                    logger.info(f"[INFO] Synchronizuji INTENZITU pro datum {date_str}")
-
-                random_sleep()
-            except GarminNotFoundError:
-                logger.debug(f"[DEBUG] Intenzita pro {date_str}: 404, přeskakuji den")
-            except GarminRateLimitError:
-                logger.warning(
-                    f"[RATE LIMIT] Garmin API nás odřízlo u metriky INTENZITA. "
-                    f"Uloženo {len(intensity_data)} záznamů. Ukončuji skript."
-                )
-                if intensity_data:
-                    append_or_update_csv(CSV_FILES["intensity"], intensity_data)
-                raise
-            except Exception as e:
-                logger.debug(f"[DEBUG] Chyba při stahování intenzitních dat pro {date_str}: {str(e)[:50]}")
-
-            current_date += timedelta(days=1)
-
-        if intensity_data:
-            append_or_update_csv(CSV_FILES["intensity"], intensity_data)
-            logger.info(f"[INFO] Synchronizovány INTENZITA data: {len(intensity_data)} záznamů")
-        else:
-            logger.info("[INFO] Intenzita: bez dostupných dat v API")
-
-    except GarminRateLimitError:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Chyba při synchronizaci intenzity: {e}")
+def _parse_intensity(resp: Any, date_str: str) -> Optional[dict]:
+    if not (resp and isinstance(resp, dict)):
+        return None
+    moderate_min = resp.get("moderateIntensityMinutes", 0)
+    vigorous_min = resp.get("vigorousIntensityMinutes", 0)
+    return {
+        "date": date_str,
+        "moderate_min": moderate_min,
+        "vigorous_min": vigorous_min,
+        "total_intensity_min": moderate_min + vigorous_min,
+    }
 
 
 def sync_heart_rate(garmin_obj: Garmin, start_date: str, end_date: str) -> None:
@@ -1833,10 +1220,9 @@ def main() -> set:
         ("SPÁNEK", sync_sleep),
         ("DAILY HEALTH", sync_daily_health),
         ("TRAINING READINESS", sync_training_readiness),
-        # ("TRAINING STATUS", sync_training_status),          # vrací 404 / prázdná data
-        # ("TRAINING STATUS HISTORY", sync_training_status_history),  # vrací 404 / prázdná data
-        # ("LOAD FOCUS", sync_load_focus),                   # vrací 404 / prázdná data
-        # ("LACTATE THRESHOLD", sync_lactate_threshold),     # vrací 404 / prázdná data
+        # Training Status / Status History / Load Focus / Lactate Threshold:
+        # Garmin na těchto endpointech pro tenhle účet vrací 404 / prázdno,
+        # takže se nesynchronizují (funkce byly odstraněny 8/2026).
         ("TEPOVÁ FREKVENCE", sync_heart_rate),
         ("POHYB", sync_movement),
         ("INTENZITA", sync_intensity),

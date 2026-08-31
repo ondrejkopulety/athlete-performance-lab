@@ -24,6 +24,7 @@ import pandas as pd
 from config.settings import (
     ACWR_ACUTE_DAYS,
     ACWR_CHRONIC_DAYS,
+    ACWR_MIN_ACTIVE_DAYS,
     ATL_DAYS,
     CTL_DAYS,
     CTL_RAMP_WARN,
@@ -125,6 +126,12 @@ def compute_acwr(daily: pd.DataFrame) -> pd.DataFrame:
     Bez clipování – hodnoty > 2.0 jsou legitimní signál přetrénování
     a konzument (dashboard, chatbot) si je má vyhodnotit sám.
 
+    ALE: když v 28denním okně proběhlo méně než ACWR_MIN_ACTIVE_DAYS
+    tréninkových dní, poměr se mechanicky sesype na
+    ACWR_CHRONIC_DAYS/ACWR_ACUTE_DAYS (jedna jednotka v obou oknech dá
+    (X/7)/(X/28) = 4.0 bez ohledu na X). Takové dny dostanou NaN, protože
+    o riziku nevypovídají – jen o řídkém tréninku.
+
     Navíc CTL ramp rate = týdenní přírůstek CTL.
     """
     daily = daily.copy()
@@ -132,7 +139,15 @@ def compute_acwr(daily: pd.DataFrame) -> pd.DataFrame:
 
     acute = trimp_col.rolling(ACWR_ACUTE_DAYS, min_periods=ACWR_ACUTE_DAYS).mean()
     chronic = trimp_col.rolling(ACWR_CHRONIC_DAYS, min_periods=ACWR_CHRONIC_DAYS).mean()
-    daily["acwr"] = (acute / chronic.replace(0, np.nan)).round(2)
+    acwr = (acute / chronic.replace(0, np.nan)).round(2)
+
+    active_days = (
+        (trimp_col > 0)
+        .rolling(ACWR_CHRONIC_DAYS, min_periods=ACWR_CHRONIC_DAYS)
+        .sum()
+    )
+    acwr = acwr.where(active_days >= ACWR_MIN_ACTIVE_DAYS)
+    daily["acwr"] = acwr
 
     if "ctl" in daily.columns:
         daily["ctl_ramp_rate"] = (daily["ctl"] - daily["ctl"].shift(7)).round(2)

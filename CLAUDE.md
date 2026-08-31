@@ -278,6 +278,12 @@ Dashboard.dc.html`, v repu jako vizuální reference — data v něm jsou fiktiv
 - `src/coach/context.py` — payload pro `/api/coach/context`.
 - `src/ingestion/sport.py` — kanonický tvar `"hlavní/pod"` pro `activities.sport`.
   Jediné místo, které o tom rozhoduje; dřív existovaly tři tvary téhož sportu.
+  Taky `is_ebike()`: **elektrokolo se počítá do zátěže a formy** (TRIMP → CTL/ATL/
+  TSB, minuty v zónách), **ne do objemu cyklistiky** (km, převýšení, počet jízd)
+  ani do metrik stojících na poměru výkon↔tep — efektivita (TRIMP/km), cardiac
+  drift, DFA prahy, odhad LTHR, tepová křivka, HRR, VAM. Rozpozná se z podřetězce
+  `e_bike` v kanonickém sportu, takže každá další jízda z e-bike profilu sedne
+  správně sama.
 - `src/botanical/`, `src/core/`, `src/reporting/` — analýza zastávek a hotspotů,
   oddělená od tréninkové pipeline. Ještě čte CSV, ne databázi.
 - `scripts/setup/` — jednorázové (migrace CSV→DB, seed tokenu, preflight).

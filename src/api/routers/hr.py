@@ -33,7 +33,6 @@ from config.settings import (
     THRESHOLD_STALE_DAYS,
     Z3_BRIDGE_TOLERANCE_S,
 )
-from src.analytics.exports import CYCLING_SPORT_PATTERN
 from src.analytics.hr_panels import (
     block_period_summary,
     curve_points,
@@ -43,6 +42,7 @@ from src.analytics.hr_panels import (
 from src.api.schemas import HrBlocksOut, HrCurveOut, ThresholdIn, ThresholdOut
 from src.db import repository as repo
 from src.db.session import get_session
+from src.ingestion.sport import CYCLING_SPORT_REGEX as CYCLING_SPORT_PATTERN
 
 router = APIRouter(tags=["hr"])
 

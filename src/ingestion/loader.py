@@ -108,7 +108,7 @@ def extract_rr_intervals_ms(fit_path: str) -> list[float]:
 
 def _parse_worker(args: tuple) -> Optional[dict]:
     """Picklovatelný worker pro mp.Pool – jeden FIT soubor = jeden úkol."""
-    path, source, sha, start_time = args
+    path, source, sha, start_time, strava_id = args
     parsed = parse_fit_to_memory(path)
     if parsed is None:
         return None
@@ -121,6 +121,7 @@ def _parse_worker(args: tuple) -> Optional[dict]:
         "source": source,
         "sha": sha,
         "start_time": start_time,
+        "strava_id": strava_id,
     }
 
 
@@ -165,6 +166,7 @@ def _activity_row(res: dict) -> dict:
         "training_effect_anaerobic": _num(s.get("training_effect_anaerobic")),
         "vo2_max": _num(s.get("vo2_max")),
         "source": res["source"],
+        "strava_id": res.get("strava_id"),
         "fit_path": res["path"],
         "fit_sha256": res["sha"],
     }
@@ -233,7 +235,7 @@ def load_fit_files(
         if not force and aid in known and known[aid] == sha:
             result.skipped += 1
             continue
-        todo.append((e["path"], e["source"], sha, e.get("start_time")))
+        todo.append((e["path"], e["source"], sha, e.get("start_time"), e.get("strava_id")))
 
     if limit is not None:
         todo = todo[:limit]

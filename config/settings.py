@@ -33,7 +33,20 @@ LOGS_DIR        = PROJECT_ROOT / "logs"
 # ATHLETE PROFILE
 # ============================================================
 MAX_HR          = 199          # Maximum heart rate (bpm)
-RESTING_HR      = 41           # Resting heart rate (bpm)
+# 49, ne 41: slouží jen jako ZÁLOHA pro dny bez měření klidového tepu
+# (hlavně 2022, kdy neexistoval ani Apple záznam). Naměřený 90denní medián
+# se pohybuje kolem 49 bpm (rhr_baseline_90d: min 44, max 57), takže 41
+# ležela ~8 bpm mimo a systematicky posouvala TRIMP těch dní. Dny s dostatkem
+# měření tuhle konstantu nevidí – řídí se vlastním baseline.
+RESTING_HR      = 49           # Resting heart rate (bpm) – fallback jen bez měření
+
+# Fyziologicky možný rozsah okamžitého tepu. Mimo něj jde o výpadek nebo
+# glitch senzoru, ne o tep: optický snímač v pauze umí hlásit jednotky bpm
+# (v datech avg_hr až 3), hrudní pás zas krátké špičky nad 220. Takové
+# vzorky se zahazují (→ NULL) při parsování FITu i před výpočtem tepové
+# křivky, aby neředily avg_hr ani nenafoukly nejvyšší okno křivky.
+HR_PLAUSIBLE_MIN_BPM = 25
+HR_PLAUSIBLE_MAX_BPM = 225
 
 # Hardcoded heart rate zones (bpm) – measured from lactate tests / personal experience.
 # Each zone is (lower_bound_inclusive, upper_bound_inclusive).
@@ -58,6 +71,13 @@ CTL_RAMP_WARN   = 8.0          # CTL ramp rate → burnout warning
 # ACWR (Acute : Chronic Workload Ratio)
 ACWR_ACUTE_DAYS   = 7
 ACWR_CHRONIC_DAYS = 28
+# Minimální počet aktivních dní (TRIMP > 0) v 28denním chronickém okně, jinak
+# je ACWR NULL. Když v okně proběhla jediná jednotka, spadne poměr mechanicky
+# na ACWR_CHRONIC_DAYS/ACWR_ACUTE_DAYS = 4.0 bez ohledu na velikost zátěže
+# ((X/7)/(X/28) = 4). V datech takhle vzniklo 25 dní s hodnotou přesně 4.00,
+# které nevypovídají o riziku, jen o řídkém tréninku – `chronic != 0` proti
+# tomu nechrání, jmenovatel je nepatrný, ne nulový.
+ACWR_MIN_ACTIVE_DAYS = 5
 
 # TRIMP constants (male Banister model)
 TRIMP_K1        = 0.64
@@ -107,8 +127,9 @@ ILLNESS_FLAG_COUNT     = 3     # simultaneous flags → illness alert
 # ============================================================
 # EFFICIENCY & ANALYTICS
 # ============================================================
-EF_WINDOW              = 30    # Efficiency factor trend window (days)
 MONOTONY_WINDOW        = 7     # Training monotony window (days)
+# EF_WINDOW zrušeno: trend efektivity běží na lokální konstantě 14 dní
+# (viz EFFICIENCY_TREND_WINDOW v quality.py), 30denní hodnotu nikdo nečetl.
 
 # Fueling model – fat / carb split per zone
 FAT_PCT_BY_ZONE        = {"Z1": 0.80, "Z2": 0.60, "Z3": 0.40, "Z4": 0.10, "Z5": 0.00}
@@ -163,6 +184,26 @@ HR_ONLY_MAX_MINUTES = 180.0
 # GARMIN SYNC
 # ============================================================
 INITIAL_BACKFILL_DAYS  = 3     # Days of history on first sync (low to avoid rate-limit ban)
+
+# ============================================================
+# STRAVA – párování odkazů na aktivity
+# ============================================================
+# Naše `activities.strava_id` drží ID aktivity na Stravě kvůli odkazu
+# strava.com/activities/{id}. U jízd, kde deduplikace spárovala Garmin i Strava
+# FIT, ho vyplní `src/ingestion/dedup.py`. Zbytek (typicky novější jízdy, jejichž
+# Strava originál ještě není v `data/fit/strava_originals/`) doplní krok
+# `strava` z REST API – seznam aktivit ze Stravy se spáruje podle času startu.
+#
+# Okno shody: Garmin a Strava se u téže jízdy liší o vteřiny až ~2 min (Strava
+# občas ořízne rozjezd/dojezd), výjimečně (ručně nahraná / posunutá jízda) víc.
+# Na reálných datech 8 min spáruje 139 ze 157 jízd, 15 min přidá 2 další a dál
+# už je plató – 16 jízd na Stravě prostě není (dechová cvičení, krátké procházky,
+# smazané aktivity). Párování je 1:1 podle nejbližšího času, takže i s 15min
+# oknem vyhraje pravý protějšek (leží do ~2 min), ne náhodná jízda opodál.
+STRAVA_MATCH_WINDOW_MIN = 15.0
+STRAVA_TOKEN_URL        = "https://www.strava.com/oauth/token"
+STRAVA_API_ACTIVITIES   = "https://www.strava.com/api/v3/athlete/activities"
+STRAVA_ACTIVITY_URL     = "https://www.strava.com/activities/{id}"
 
 # ============================================================
 # CSV FILE NAMES (inside SUMMARIES_DIR)
@@ -282,13 +323,39 @@ DATABASE_URL: str = os.getenv("DATABASE_URL") or (
 #       doplněné mezery v tepu, kanonický název sportu
 #   4 = trimp_load_percentile – percentilové pořadí zátěže vůči vlastní
 #       historii kardio aktivit (detail aktivity, verdikt/gauge)
-ACTIVITY_METRICS_VERSION: int = 5  # Nové tepové zóny – změna Z3/Z4/Z5 (8/2026)
+#   5 = nové tepové zóny – změna Z3/Z4/Z5 (8/2026)
+#   6 = Elektrokolo vyňato z per-activity fyziologie: cardiac_drift, DFA prahy,
+#       best_Nmin_hr (tepová křivka → lthr_estimate), max_hrr_60s, durability_pct,
+#       resp_rate_rsa a vam_m_per_h se pro e_bike nepočítají – motor rozbíjí
+#       vztah výkon↔tep. TRIMP a minuty v zónách zůstávají (elektro se dál
+#       počítá do formy). Viz sport.is_ebike.
+ACTIVITY_METRICS_VERSION: int = 7  # (8/2026) čtyři opravy dohromady:
+#       – cardiac_drift a durability_pct: fallback na speed u kola bez
+#         wattmetru (jen na rovině), dřív vycházely None pro celou databázi
+#         bez power dat (18 z 884 aktivit);
+#       – kanonizace sportu: mountain_biking / ride / gravel_cycling atd. se
+#         teď skládají do "cycling/*", takže MTB projde jako kardio a jako kolo
+#         (dřív bral drift/durability jako běh);
+#       – klidový tep: fallback RESTING_HR 41 → 49 (blíž naměřenému baseline),
+#         mění trimp_adjusted dní bez měření RHR;
+#       – implausibilní okamžitý tep (< 25 / > 225 bpm) se zahazuje před
+#         výpočtem, čistí avg_hr, best_Nmin_hr a odtud lthr_estimate.
 
 # Bump when a daily formula changes → vynutí full rebuild daily_metrics.
 #   2 = 90denní baseline klidového tepu, lthr_estimate
 #   3 = zrušena recovery_tax_hours_daily, přibyl Garmin Training Readiness
 #   4 = osa začíná první aktivitou, ne první biometrií (viz calendar.py)
-DAILY_METRICS_VERSION: int = 5  # Nové tepové zóny – změna Z3/Z4/Z5 (8/2026)
+#   5 = nové tepové zóny – změna Z3/Z4/Z5 (8/2026)
+DAILY_METRICS_VERSION: int = 6  # (8/2026):
+#       – ACWR je NULL, když v 28denním okně bylo < ACWR_MIN_ACTIVE_DAYS
+#         aktivních dní (dřív mechanická 4.00 u řídkého tréninku);
+#       – daily_efficiency ignoruje jízdy bez tepu (TRIMP 0 → dělení dávalo 0,
+#         to otravovalo ef_trend a fatigue_index);
+#       – readiness_score je NULL ve dnech bez zátěže (CTL≈ATL≈0) i bez
+#         biometrie – legacy vzorec tam vracel fixních 75 (fixní bod TSB=0);
+#       – polarization_efficiency zrušeno (bylo jen ≈ 105 − 2·z3_junk_pct);
+#       – critical_hr přesunuto z activity_metrics do daily_metrics;
+#       – fallback RESTING_HR 41 → 49 (přes trimp_adjusted).
 
 # ============================================================
 # PRAHOVÝ TEP Z TERÉNNÍCH DAT (LTHR)
@@ -424,8 +491,11 @@ THRESHOLD_STALE_DAYS = 90
 #       s podmínkou na hloubku propadu
 #   2 = ffill 15 s místo 5 s (viz HR_GRID_FFILL_LIMIT_S); u bloků navíc
 #       histogram délek úseků
-HR_CURVE_VERSION: int = 2
-HR_BLOCKS_VERSION: int = 2
+#   3 = implausibilní okamžitý tep (< HR_PLAUSIBLE_MIN_BPM / > HR_PLAUSIBLE_MAX_BPM)
+#       se zahazuje před přeindexováním na sekundovou mřížku – glitch senzoru
+#       jinak nafoukl nejvyšší okno křivky (hr_curve_60s až 199.9)
+HR_CURVE_VERSION: int = 3
+HR_BLOCKS_VERSION: int = 3
 
 # Kolik dní historie načíst před prvním "dirty" dnem, aby rolling okna
 # (monotony 7d, ACWR 7/28d, polarizace 14d, HRV z-score 30d, strain kvantil 30d)
@@ -654,8 +724,11 @@ METRIC_META: dict[str, dict] = {
     },
     "resp_rate_rsa": {
         "unit": "dechů/min", "direction": "neutral",
-        "note": "Dechová frekvence z respirační sinusové arytmie (Welch PSD "
-                "nad R-R intervaly, pásmo 0.15–0.50 Hz).",
+        "note": "EXPERIMENTÁLNÍ, nepoužívej k závěrům. Dechová frekvence z "
+                "respirační sinusové arytmie (Welch PSD nad R-R intervaly, pásmo "
+                "0.15–0.50 Hz). Na reálných datech vychází 9–13 dech/min, tedy "
+                "přilepené na dolní hranici pásma (0.15 Hz = 9/min) – metoda "
+                "zjevně jen vybírá nejnižší koš. Vyřazeno z master exportu.",
     },
     "epoc_score": {
         "unit": "body", "direction": "neutral",

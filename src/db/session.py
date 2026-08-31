@@ -35,7 +35,17 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 @contextmanager
 def session_scope() -> Iterator[Session]:
-    """Transakční kontext pro CLI a pipeline: commit při úspěchu, rollback při chybě."""
+    """
+    Session pro CLI a pipeline: závěrečný commit při úspěchu, rollback při chybě,
+    vždy ``close``.
+
+    POZOR: není to jedna atomická transakce přes celý blok. Dlouhé kroky
+    (LOAD commituje po 25 aktivitách, ANALYZE a STRAVA commitují samy)
+    zapisují průběžně – jedna transakce přes 884 aktivit by držela miliony
+    řádků a při pádu by se zahodil několikaminutový běh. Závěrečný commit
+    tady tedy jen dorovná to, co ještě viselo od posledního kroku; kroky,
+    které doběhly, zůstávají zapsané i když pozdější krok spadne.
+    """
     session = SessionLocal()
     try:
         yield session
@@ -54,11 +64,6 @@ def get_session() -> Iterator[Session]:
         yield session
     finally:
         session.close()
-
-
-def raw_connection():
-    """psycopg3 spojení pro COPY (bulk import records) – obchází ORM overhead."""
-    return engine.raw_connection()
 
 
 def check_connection() -> bool:

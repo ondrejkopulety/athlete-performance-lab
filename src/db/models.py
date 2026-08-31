@@ -99,6 +99,10 @@ class Activity(Base):
 
     # Provenience
     source: Mapped[str | None] = mapped_column(String(16), index=True)  # garmin | strava
+    # ID spárované aktivity na Stravě (odkaz strava.com/activities/{strava_id}).
+    # Drží se i tehdy, když kanonický FIT je z Garminu a Strava protějšek
+    # prohrál deduplikaci – viz src/ingestion/dedup.py. NULL = na Stravě není.
+    strava_id: Mapped[str | None] = mapped_column(String(64))
     fit_path: Mapped[str | None] = mapped_column(Text)
     fit_sha256: Mapped[str | None] = mapped_column(String(64))
     ingested_at: Mapped[datetime] = mapped_column(
@@ -181,7 +185,8 @@ class ActivityMetrics(Base):
     epoc_score: Mapped[float | None] = mapped_column(Float)
     time_at_threshold_min: Mapped[float | None] = mapped_column(Float)
     tte_z4z5_min: Mapped[float | None] = mapped_column(Float)
-    critical_hr: Mapped[float | None] = mapped_column(Float)
+    # critical_hr přesunuto do DailyMetrics – je to jedna atletova hodnota
+    # (85. percentil přes celou historii), ne per-activity metrika.
     tati_score: Mapped[float | None] = mapped_column(Float)
 
     # Percentilové pořadí TRIMP téhle aktivity mezi kardio aktivitami
@@ -444,7 +449,11 @@ class DailyMetrics(Base):
     polarization_low_pct: Mapped[float | None] = mapped_column(Float)
     polarization_high_pct: Mapped[float | None] = mapped_column(Float)
     z3_junk_pct: Mapped[float | None] = mapped_column(Float)
-    polarization_efficiency: Mapped[float | None] = mapped_column(Float)
+
+    # Critical HR – 85. percentil průměrného tepu přes celou historii kardio
+    # aktivit (Monod-Scherrer adaptovaný na tep). Jedna atletova hodnota,
+    # do daily jde konstantou. Přesunuto sem z activity_metrics.
+    critical_hr: Mapped[float | None] = mapped_column(Float)
 
     # Regenerace a biometrie (denormalizované pro rychlé čtení dashboardem)
     readiness_score: Mapped[float | None] = mapped_column(Float)

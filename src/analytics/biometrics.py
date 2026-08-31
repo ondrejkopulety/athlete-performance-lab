@@ -210,6 +210,17 @@ def compute_readiness(daily: pd.DataFrame) -> pd.DataFrame:
     readiness = readiness.clip(0, 100).round(1)
     readiness[tsb.isna()] = np.nan  # bez tréninkových dat nemá smysl
 
+    # Legacy vzorec při TSB ≈ 0 vrací fixních 75 (fixní bod mapování
+    # −30→0 / +10→100). Ve dnech, kdy CTL i ATL jsou prakticky nula (dávno
+    # před prvním tréninkem nebo po dlouhé pauze), to není forma 75/100,
+    # ale jen tvar rovnice – vypadá jako měření, přitom není o co se opřít.
+    # Modern mód (má HRV i spánek) tenhle problém nemá, tam readiness stojí
+    # i na biometrii.
+    ctl = pd.to_numeric(daily.get("ctl"), errors="coerce")
+    atl = pd.to_numeric(daily.get("atl"), errors="coerce")
+    no_load = (ctl.abs() < 0.5) & (atl.abs() < 0.5)
+    readiness[no_load.fillna(False) & ~is_modern] = np.nan
+
     daily["readiness_score"] = readiness
     return daily
 

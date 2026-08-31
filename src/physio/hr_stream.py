@@ -50,6 +50,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from config.settings import HR_PLAUSIBLE_MAX_BPM, HR_PLAUSIBLE_MIN_BPM
+
 
 def to_second_grid(
     timestamps: np.ndarray,
@@ -81,6 +83,11 @@ def to_second_grid(
     hr = np.asarray(heart_rate, dtype=float)
     if ts.size == 0 or hr.size == 0:
         return np.empty(0, dtype=float)
+
+    # Implausibilní vzorek (glitch senzoru) = nepokrytá sekunda, ne tep.
+    # Musí padnout dřív, než ffill roztáhne poslední známou hodnotu –
+    # jinak by se 3bpm výpadek nebo 240bpm špička propsaly do okolí.
+    hr = np.where((hr < HR_PLAUSIBLE_MIN_BPM) | (hr > HR_PLAUSIBLE_MAX_BPM), np.nan, hr)
     if ts.size != hr.size:
         raise ValueError(f"timestamps a heart_rate mají různou délku: {ts.size} vs {hr.size}")
 

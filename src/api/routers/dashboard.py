@@ -23,7 +23,6 @@ from config.settings import (
     LTHR_DEFAULT_BPM,
     Z3_BRIDGE_TOLERANCE_S,
 )
-from src.analytics.exports import CYCLING_SPORT_PATTERN
 from src.analytics.hr_panels import Coverage, unintentional_z3_s, zone_threshold_bpm
 from src.api.schemas import (
     DashboardActivity,
@@ -36,6 +35,7 @@ from src.api.schemas import (
 from src.db import repository as repo
 from src.db.models import Activity, ActivityMetrics, DailyMetrics
 from src.db.session import get_session
+from src.ingestion.sport import CYCLING_SPORT_REGEX, EBIKE_SPORT_PATTERN
 
 router = APIRouter(tags=["dashboard"])
 
@@ -121,7 +121,9 @@ def dashboard(session: Session = Depends(get_session)) -> DashboardOut:
 
     # ── Cyklistické aktivity ──────────────────────────────────────────────
     # Stejný filtr jako `export_cycling` – dashboard tak ukazuje přesně tu
-    # množinu jízd, která je i v cycling_summary.csv.
+    # množinu jízd, která je i v cycling_summary.csv. Elektrokolo je mimo:
+    # do objemu (km, převýšení) se nepočítá, do formy přispívá přes TRIMP
+    # v denních metrikách.
     act_rows = session.execute(
         select(
             Activity.activity_id,
@@ -147,13 +149,16 @@ def dashboard(session: Session = Depends(get_session)) -> DashboardOut:
             ActivityMetrics.carb_g,
         )
         .outerjoin(ActivityMetrics, ActivityMetrics.activity_id == Activity.activity_id)
-        .where(Activity.sport.op("~*")(CYCLING_SPORT_PATTERN))
+        .where(Activity.sport.op("~*")(CYCLING_SPORT_REGEX))
+        .where(~Activity.sport.op("~*")(EBIKE_SPORT_PATTERN))
         .order_by(Activity.date, Activity.activity_id)
     ).all()
 
     # ── Pokrytí a nezáměrná Z3 ────────────────────────────────────────────
     # Obojí stojí na předpočítaných tabulkách; tady se jen překládá.
-    coverage = repo.read_hr_coverage(session)
+    coverage = repo.read_hr_coverage(
+        session, activity_ids=[r.activity_id for r in act_rows]
+    )
 
     # Nezáměrná Z3 = čas v Z3 mimo souvislé bloky. Hranice Z3 se odvodí
     # z LTHR lookupem na mřížku prahů – dvě čísla do dotazu, nic k přepočtu.

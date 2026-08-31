@@ -13,10 +13,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from config.settings import EF_WINDOW, MONOTONY_WINDOW  # noqa: F401  (EF_WINDOW drží konfiguraci)
+from config.settings import MONOTONY_WINDOW
+from src.ingestion.sport import cycling_mask
 
-# Okno pro trend efektivity. Historicky se používala lokální konstanta 14,
-# ne EF_WINDOW (30) ze settings – zachováno, aby výsledky seděly.
+# Okno pro trend efektivity (dny). Lokální konstanta, ne ze settings –
+# historická hodnota, kterou se výsledky drží.
 EFFICIENCY_TREND_WINDOW = 14
 
 # Fyziologický strop monotonie. Při nízké odchylce a vysoké průměrné zátěži
@@ -24,15 +25,12 @@ EFFICIENCY_TREND_WINDOW = 14
 MONOTONY_CAP = 4.0
 MONOTONY_EPSILON = 1e-5
 
-# Tolerovaný podíl Z3, nad který se sráží polarizační efektivita.
-Z3_TOLERANCE_PCT = 5.0
-
 ZONE_COLUMNS = ["time_in_z1", "time_in_z2", "time_in_z3", "time_in_z4", "time_in_z5"]
 
-# Sporty, u kterých má TRIMP/km smysl porovnávat. Míchání sportů by metriku
-# znehodnotilo: kolo dává zhruba poloviční TRIMP/km oproti běhu, takže při
-# střídání sportů by fatigue_index skákal bez souvislosti s únavou.
-EFFICIENCY_SPORT_PATTERN = "cycling|biking|ride|bike"
+# TRIMP/km má smysl porovnávat jen v rámci kola (míchání sportů by metriku
+# znehodnotilo – kolo dává zhruba poloviční TRIMP/km oproti běhu). Elektrokolo
+# je taky mimo (motor sráží TRIMP/km na zlomek). Klasifikace sportu žije
+# jednotně v src/ingestion/sport.py – viz cycling_mask.
 
 
 def compute_monotony_strain(daily: pd.DataFrame) -> pd.DataFrame:
@@ -63,14 +61,14 @@ def compute_polarization(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.Da
     Low = Z1+Z2, High = Z4+Z5. Jmenovatelem je čas ve VŠECH zónách včetně Z3,
     aby „šedá zóna" polarizační skóre správně snižovala.
 
-    polarization_efficiency navíc sráží 1 procentní bod za každé 1 %
-    Z3 nad tolerovanou hranicí – trénink může být 80/20 a přesto rozmělněný.
+    (Dřívější `polarization_efficiency` zrušena – algebraicky vycházela
+    ≈ 105 − 2·z3_junk_pct, tedy jen převrácený `z3_junk_pct` bez vlastní
+    informace.)
     """
     daily = daily.copy()
 
     if activities is None or activities.empty or not all(c in activities.columns for c in ZONE_COLUMNS):
-        for col in ("polarization_low_pct", "polarization_high_pct",
-                    "z3_junk_pct", "polarization_efficiency"):
+        for col in ("polarization_low_pct", "polarization_high_pct", "z3_junk_pct"):
             daily[col] = np.nan
         return daily
 
@@ -94,15 +92,7 @@ def compute_polarization(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.Da
     daily["polarization_low_pct"] = ((low_14d / total_14d) * 100).round(1)
     daily["polarization_high_pct"] = ((high_14d / total_14d) * 100).round(1)
 
-    z3_pct = ((mid_14d / total_14d) * 100).round(1)
-    daily["z3_junk_pct"] = z3_pct
-    z3_penalty = (z3_pct - Z3_TOLERANCE_PCT).clip(lower=0.0)
-    daily["polarization_efficiency"] = (
-        (daily["polarization_low_pct"] + daily["polarization_high_pct"] - z3_penalty)
-        .clip(lower=0.0, upper=100.0)
-        .round(1)
-        .clip(lower=0.0)
-    )
+    daily["z3_junk_pct"] = ((mid_14d / total_14d) * 100).round(1)
     return daily
 
 
@@ -115,6 +105,11 @@ def compute_efficiency_index(daily: pd.DataFrame, activities: pd.DataFrame) -> p
 
     Trend se počítá nad řídkými daty (jen dny s jízdou), aby dny volna
     metriku uměle nevyhlazovaly.
+
+    Jízdy bez tepu se vynechávají: Strava import bez HR má čas v zónách 0,
+    tedy total_trimp i trimp_adjusted 0, a sum(TRIMP)/sum(km) pak vyjde 0.
+    Nula není „dokonalá efektivita" – je to chybějící vstup, který se dřív
+    šířil do ef_trend (ffill) a fatigue_index (dělení nulou).
     """
     daily = daily.copy()
     daily["daily_efficiency"] = np.nan
@@ -125,9 +120,7 @@ def compute_efficiency_index(daily: pd.DataFrame, activities: pd.DataFrame) -> p
     if not {"distance_km", "total_trimp", "sport"} <= set(activities.columns):
         return daily
 
-    cardio = activities.loc[
-        activities["sport"].str.contains(EFFICIENCY_SPORT_PATTERN, case=False, na=False)
-    ].copy()
+    cardio = activities.loc[cycling_mask(activities["sport"])].copy()
     if cardio.empty:
         return daily
 
@@ -136,6 +129,11 @@ def compute_efficiency_index(daily: pd.DataFrame, activities: pd.DataFrame) -> p
     cardio["total_trimp"] = pd.to_numeric(cardio["total_trimp"], errors="coerce")
     cardio = cardio.dropna(subset=["distance_km", "total_trimp"])
     cardio = cardio.loc[cardio["distance_km"] > 0]
+
+    # Jízda bez tepu: buď chybí avg_hr, nebo z ní nevznikla žádná zátěž.
+    if "avg_hr" in cardio.columns:
+        cardio = cardio.loc[pd.to_numeric(cardio["avg_hr"], errors="coerce").notna()]
+    cardio = cardio.loc[cardio["total_trimp"] > 0]
     if cardio.empty:
         return daily
 

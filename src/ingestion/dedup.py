@@ -425,6 +425,10 @@ def deduplicate(entries: list[dict]) -> list[dict]:
             winner, reason = _pick_winner(last, candidate)
             loser = candidate if winner is last else last
 
+            # Odkaz na Strava aktivitu chceme i tehdy, když vyhrál Garmin –
+            # ID vezmeme z poraženého Strava souboru.
+            winner["strava_id"] = _paired_strava_id(winner, loser)
+
             date_str = candidate["start_time"].strftime("%Y-%m-%d %H:%M")
             log.info(
                 "Duplicita [%s]: %s  "
@@ -452,6 +456,27 @@ def deduplicate(entries: list[dict]) -> list[dict]:
         duplicates_found, garmin_wins, strava_wins, len(kept),
     )
     return kept
+
+
+def _paired_strava_id(*entries: dict) -> Optional[str]:
+    """
+    Numerické Strava ID z libovolného ze spárovaných FIT souborů.
+
+    Strava export se jmenuje ``…_<ID>.fit``; ``extract_activity_id`` z něj to
+    číslo vytáhne. Bereme ho i z poraženého souboru – právě kvůli němu tohle
+    párování vzniklo (Garmin s pásem vyhraje deduplikaci, ale odkaz na Stravu
+    chceme mít i tak). ``strava_id`` už dřív přiřazené (3-cestné duplicity) se
+    zachová.
+    """
+    for e in entries:
+        if e["source"] == SOURCE_STRAVA:
+            sid = extract_activity_id(e["path"])
+            if sid and sid.isdigit():
+                return sid
+    for e in entries:
+        if e.get("strava_id"):
+            return e["strava_id"]
+    return None
 
 
 def _sensor_label(sensor: str) -> str:
@@ -710,5 +735,12 @@ def canonical_fit_files() -> list[dict]:
     )
     for e in unique:
         e["activity_id"] = extract_activity_id(e["path"])
+        # Aktivity bez duplicity deduplikací neprošly – Strava ID doplň z jejich
+        # vlastní cesty (u Garmin-only jízd zůstane None).
+        if not e.get("strava_id") and e["source"] == SOURCE_STRAVA:
+            sid = e["activity_id"]
+            e["strava_id"] = sid if sid.isdigit() else None
+        else:
+            e.setdefault("strava_id", None)
     return unique
 

@@ -13,15 +13,16 @@ DataFrame a SQL a řeší dvě věci, na kterých se to jinak vždycky rozbije:
 from __future__ import annotations
 
 import io
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import date
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any
 
-import numpy as np
 import pandas as pd
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from src.core.labels import activity_label
 from src.db.models import (
     Activity,
     ActivityHrBlocks,
@@ -34,48 +35,11 @@ from src.db.models import (
     Record,
     SyncState,
 )
-from src.db.session import raw_connection
-
-# ═══════════════════════════════════════════════════════════════════════════
-# NaN / typová sanitizace
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _clean_value(v: Any) -> Any:
-    """pandas/numpy hodnota → něco, co spolkne psycopg i json.dumps."""
-    if v is None:
-        return None
-    if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
-        return None
-    if v is pd.NaT:
-        return None
-    if isinstance(v, (np.integer,)):
-        return int(v)
-    if isinstance(v, (np.floating,)):
-        f = float(v)
-        return None if (np.isnan(f) or np.isinf(f)) else f
-    if isinstance(v, (np.bool_,)):
-        return bool(v)
-    if isinstance(v, pd.Timestamp):
-        return v.to_pydatetime()
-    # pd.isna vyhodí ValueError na polích/listech – ty projdou beze změny
-    try:
-        if pd.isna(v):
-            return None
-    except (TypeError, ValueError):
-        pass
-    return v
-
-
-def records_to_dicts(df: pd.DataFrame, columns: Sequence[str] | None = None) -> list[dict]:
-    """DataFrame → list dictů připravený pro upsert (NaN už jsou None)."""
-    if df.empty:
-        return []
-    cols = [c for c in (columns or df.columns) if c in df.columns]
-    out: list[dict] = []
-    for row in df[cols].to_dict(orient="records"):
-        out.append({k: _clean_value(v) for k, v in row.items()})
-    return out
-
+from src.db.sanitize import (
+    copy_value,
+    orm_rows_to_df,
+    records_to_dicts,  # noqa: F401 – re-export, volající sahají přes repo.records_to_dicts
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Generický upsert
@@ -198,33 +162,13 @@ def read_hr_blocks(session: Session) -> pd.DataFrame:
         ActivityHrBlocks.threshold_bpm,
         ActivityHrBlocks.bridge_tolerance_s,
     )
-    return pd.DataFrame(
-        [
-            {c.name: getattr(b, c.name) for c in ActivityHrBlocks.__table__.columns}
-            for b in session.scalars(stmt)
-        ]
-    )
+    return orm_rows_to_df(session.scalars(stmt), ActivityHrBlocks)
 
 
 # ── Podklad pro panely dashboardu ─────────────────────────────────────────
 # Vrací se seznamy slovníků, ne DataFrame: jde o desítky až stovky řádků,
 # které putují rovnou do JSON, takže převod přes pandas by jen přidal krok.
-
-
-def _activity_label(sport: str | None, km: float | None, minutes: float | None) -> str:
-    """
-    Popisek jízdy do panelu – "odkud ten bod je".
-
-    Nepoužívá ``activities.activity_name``: ten je v celé databázi NULL
-    (Garmin ho v exportu neposílá), takže by z popisku zbylo prázdno.
-    """
-    parts = [(sport or "aktivita").split("/")[0]]
-    if km:
-        parts.append(f"{km:.0f} km")
-    if minutes:
-        hours, mins = divmod(int(minutes), 60)
-        parts.append(f"{hours}:{mins:02d}" if hours else f"{mins} min")
-    return " · ".join(parts)
+# Popisek řádku staví core.labels.activity_label (formátování, ne data).
 
 
 def read_curve_rows(
@@ -271,7 +215,7 @@ def read_curve_rows(
             "max_mean_hr": float(r.max_mean_hr),
             "activity_id": r.activity_id,
             "date": r.date,
-            "label": _activity_label(r.sport, r.distance_km, r.duration_minutes),
+            "label": activity_label(r.sport, r.distance_km, r.duration_minutes),
         }
         for r in session.execute(stmt).all()
     ]
@@ -326,7 +270,7 @@ def read_block_rows(
             "segment_hist_counts": list(r.segment_hist_counts or []),
             "segment_hist_seconds": list(r.segment_hist_seconds or []),
             "date": r.date,
-            "label": _activity_label(r.sport, r.distance_km, r.duration_minutes),
+            "label": activity_label(r.sport, r.distance_km, r.duration_minutes),
         }
         for r in session.execute(stmt).all()
     ]
@@ -365,8 +309,15 @@ def read_block_totals(
     return out
 
 
-def read_hr_coverage(session: Session) -> dict[str, dict]:
-    """Pokrytí všech aktivit, podle ``activity_id``."""
+def read_hr_coverage(
+    session: Session, activity_ids: Sequence[str] | None = None
+) -> dict[str, dict]:
+    """
+    Pokrytí aktivit, podle ``activity_id``.
+
+    ``activity_ids`` omezí dotaz jen na potřebné jízdy – dashboard renderuje
+    pokrytí u cyklo aktivit, ne u fotbalu a jógy.
+    """
     stmt = select(
         ActivityHrCoverage.activity_id,
         ActivityHrCoverage.span_s,
@@ -375,6 +326,11 @@ def read_hr_coverage(session: Session) -> dict[str, dict]:
         ActivityHrCoverage.longest_gap_s,
         ActivityHrCoverage.max_curve_duration_s,
     )
+    if activity_ids is not None:
+        ids = list(activity_ids)
+        if not ids:
+            return {}
+        stmt = stmt.where(ActivityHrCoverage.activity_id.in_(ids))
     return {
         r.activity_id: {
             "span_s": r.span_s,
@@ -526,12 +482,7 @@ def read_activities(
         stmt = stmt.where(Activity.date <= until)
     stmt = stmt.order_by(Activity.date, Activity.activity_id)
 
-    acts = pd.DataFrame(
-        [
-            {c.name: getattr(a, c.name) for c in Activity.__table__.columns}
-            for a in session.scalars(stmt)
-        ]
-    )
+    acts = orm_rows_to_df(session.scalars(stmt), Activity)
     if acts.empty:
         return acts
 
@@ -541,12 +492,7 @@ def read_activities(
     m_stmt = select(ActivityMetrics).where(
         ActivityMetrics.activity_id.in_(acts["activity_id"].tolist())
     )
-    metrics = pd.DataFrame(
-        [
-            {c.name: getattr(m, c.name) for c in ActivityMetrics.__table__.columns}
-            for m in session.scalars(m_stmt)
-        ]
-    )
+    metrics = orm_rows_to_df(session.scalars(m_stmt), ActivityMetrics)
     if metrics.empty:
         return acts
     metrics = metrics.drop(columns=["computed_at", "rr_intervals_ms"], errors="ignore")
@@ -597,19 +543,6 @@ RECORD_COLUMNS = [
 ]
 
 
-def _copy_value(v: Any) -> str:
-    """Serializace pro COPY ... WITH CSV. None → prázdné pole = NULL."""
-    v = _clean_value(v)
-    if v is None:
-        return ""
-    if isinstance(v, bool):
-        return "t" if v else "f"
-    s = str(v)
-    if any(ch in s for ch in (',', '"', "\n", "\r")):
-        return '"' + s.replace('"', '""') + '"'
-    return s
-
-
 def copy_records(session: Session, rows: Iterable[dict], chunk_size: int = 50_000) -> int:
     """
     Bulk zápis vteřinových dat přes COPY.
@@ -656,7 +589,7 @@ def copy_records(session: Session, rows: Iterable[dict], chunk_size: int = 50_00
             return written
 
         for row in rows:
-            buf.write(",".join(_copy_value(row.get(c)) for c in RECORD_COLUMNS) + "\n")
+            buf.write(",".join(copy_value(row.get(c)) for c in RECORD_COLUMNS) + "\n")
             n_buf += 1
             if n_buf >= chunk_size:
                 total += flush()
@@ -699,19 +632,23 @@ def delete_records(session: Session, activity_id: str) -> None:
     session.execute(delete(Record).where(Record.activity_id == activity_id))
 
 
+_RECORD_SELECT_COLS = [c.name for c in Record.__table__.columns]
+
+
 def read_records(session: Session, activity_id: str) -> pd.DataFrame:
-    """Vteřinová data jedné aktivity, seřazená podle času."""
-    stmt = (
-        select(Record)
-        .where(Record.activity_id == activity_id)
-        .order_by(Record.timestamp)
+    """
+    Vteřinová data jedné aktivity, seřazená podle času.
+
+    Přes ``pd.read_sql``, ne ORM: analytika i split-export čtou records
+    aktivitu po aktivitě (streamované záměrně – celá tabulka je 2,6 M řádků),
+    takže materializovat ORM objekty a skládat z nich dicty by na 884
+    voláních stálo řádově víc než jeden textový dotaz.
+    """
+    sql = text(
+        f"SELECT {', '.join(_RECORD_SELECT_COLS)} FROM records "
+        "WHERE activity_id = :aid ORDER BY timestamp"
     )
-    df = pd.DataFrame(
-        [
-            {c.name: getattr(r, c.name) for c in Record.__table__.columns}
-            for r in session.scalars(stmt)
-        ]
-    )
+    df = pd.read_sql(sql, session.connection(), params={"aid": activity_id})
     if not df.empty:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df
@@ -810,12 +747,7 @@ def _read_daily(session: Session, model, since, until) -> pd.DataFrame:
     if until is not None:
         stmt = stmt.where(model.date <= until)
     stmt = stmt.order_by(model.date)
-    df = pd.DataFrame(
-        [
-            {c.name: getattr(r, c.name) for c in model.__table__.columns}
-            for r in session.scalars(stmt)
-        ]
-    )
+    df = orm_rows_to_df(session.scalars(stmt), model)
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
     return df

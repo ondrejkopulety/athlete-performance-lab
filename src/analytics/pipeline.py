@@ -36,8 +36,8 @@ from config.settings import (
     LTHR_WINDOW_DAYS,
     RESTING_HR,
 )
-from src.analytics import advice, biometrics, load, quality
 from src.analytics import activity as act
+from src.analytics import advice, biometrics, load, quality
 from src.analytics.calendar import build_calendar
 from src.db import repository as repo
 
@@ -55,13 +55,26 @@ ACTIVITY_METRIC_COLUMNS = [
     # Diagnostiku R-R plní src/physio/persist.py, ne tahle pipeline –
     # v seznamu je proto není, aby ji přepočet metrik nepřepsal na NULL.
     "time_at_threshold_min", "tte_z4z5_min",
-    "critical_hr", "tati_score", "fat_kcal", "carb_kcal", "fat_g",
+    # critical_hr už není per-activity – je to jedna atletova hodnota
+    # (85. percentil přes celou historii) a přesunula se do daily_metrics.
+    "tati_score", "fat_kcal", "carb_kcal", "fat_g",
     "carb_g", "fluid_loss_l", "heat_flag",
+]
+
+# Sloupce, které plní jen `compute_activity_series_metrics` (vteřinová data
+# + R-R). U aktivit mimo `is_series_eligible` – typicky elektrokolo – se musí
+# aktivně vynulovat: přepočet jinak ponechá staré hodnoty z předchozí verze,
+# protože payload se skládá z už načteného `activities` DataFrame.
+SERIES_ONLY_COLUMNS = [
+    "best_20min_hr", "best_30min_hr", "best_60min_hr",
+    "dfa_alpha1_min", "dfa_alpha1_median", "dfa_window_count",
+    "cardiac_drift", "max_hrr_60s", "durability_pct",
+    "aet_hr_dfa", "ant_hr_dfa", "aet_hr_proxy", "dfa_quality", "resp_rate_rsa",
 ]
 
 # Metriky odvozené z celé historie, ne z jedné aktivity. Musí se
 # přepisovat u všech řádků, jinak by se v tabulce míchaly různé prahy.
-GLOBAL_METRIC_COLUMNS = ["critical_hr", "tati_score", "trimp_load_percentile"]
+GLOBAL_METRIC_COLUMNS = ["tati_score", "trimp_load_percentile"]
 
 DAILY_METRIC_COLUMNS = [
     "trimp", "trimp_epoc", "ctl", "atl", "tsb",
@@ -69,7 +82,7 @@ DAILY_METRIC_COLUMNS = [
     "monotony", "strain", "whoop_strain",
     "daily_efficiency", "ef_trend", "fatigue_index",
     "polarization_low_pct", "polarization_high_pct", "z3_junk_pct",
-    "polarization_efficiency",
+    "critical_hr",
     "readiness_score", "pure_recovery_score",
     "hrv_last_night", "hrv_weekly_avg", "hrv_cv_pct",
     "rhr_day", "rhr_baseline_14d", "rhr_baseline_90d", "rhr_elevation_bpm",
@@ -98,6 +111,7 @@ ROUND_MAP = {
     "sleep_need_min": 0, "sleep_performance_pct": 1,
     "hrv_cv_pct": 1,
     "polarization_low_pct": 1, "polarization_high_pct": 1,
+    "critical_hr": 0,
     "acwr": 2, "ctl_ramp_rate": 2,
     "fatigue_index": 3,
     "fat_kcal_daily": 0, "carb_kcal_daily": 0,
@@ -202,6 +216,11 @@ def compute_activity_metrics(
                 row.update(
                     act.compute_activity_series_metrics(tdata, meta.at[aid, "sport"], rr)
                 )
+            else:
+                # Elektrokolo a spol.: vyčisti fyziologii z předchozí verze,
+                # ať v tabulce nezůstane drift/DFA/tepová křivka spočítaná
+                # tehdy, když aktivita ještě mezi způsobilé patřila.
+                row.update({col: None for col in SERIES_ONLY_COLUMNS})
 
             series_rows[aid] = row
             if i % 50 == 0 or i == len(stale):
@@ -313,6 +332,24 @@ def _compute_lthr(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.DataFrame
     return daily
 
 
+def _broadcast_critical_hr(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.DataFrame:
+    """
+    Critical HR jako denní metrika.
+
+    Je to jedna atletova hodnota (85. percentil průměrného tepu přes celou
+    historii kardio aktivit, viz activity.compute_critical_hr), ne per-activity
+    číslo – v master exportu byla 884× stejná. Sem se propíše konstantou;
+    day-to-day varianta by chtěla expanding percentil, což zatím nemáme.
+    """
+    daily = daily.copy()
+    daily["critical_hr"] = np.nan
+    if activities is not None and not activities.empty and "critical_hr" in activities.columns:
+        vals = pd.to_numeric(activities["critical_hr"], errors="coerce").dropna()
+        if not vals.empty:
+            daily["critical_hr"] = float(vals.iloc[-1])
+    return daily
+
+
 def compute_daily_metrics(session: Session, activities: pd.DataFrame) -> pd.DataFrame:
     """
     Denní metriky nad celým kalendářem.
@@ -338,6 +375,7 @@ def compute_daily_metrics(session: Session, activities: pd.DataFrame) -> pd.Data
     daily = advice.compute_coach_advice(daily)
     daily = quality.compute_polarization(daily, activities)
     daily = _compute_lthr(daily, activities)
+    daily = _broadcast_critical_hr(daily, activities)
 
     return daily.round({k: v for k, v in ROUND_MAP.items() if k in daily.columns})
 

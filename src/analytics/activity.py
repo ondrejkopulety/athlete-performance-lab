@@ -31,22 +31,33 @@ import pandas as pd
 
 from config.settings import (
     DFA_AET_THRESHOLD,
-    HR_GRID_FFILL_LIMIT_S,
-    LTHR_BEST_WINDOWS_MIN,
-    TRIMP_K1,
-    TRIMP_K2,
     DFA_ANT_THRESHOLD,
     DFA_WINDOW_BEATS,
     DURABILITY_MIN_DURATION_MIN,
     FAT_PCT_BY_ZONE,
+    HR_GRID_FFILL_LIMIT_S,
+    HR_PLAUSIBLE_MAX_BPM,
+    HR_PLAUSIBLE_MIN_BPM,
     KCAL_PER_MIN_BY_ZONE,
+    LTHR_BEST_WINDOWS_MIN,
     MAX_3S_JUMP,
-    MAX_HR as ATHLETE_MAX_HR,
     MAX_REALISTIC_HRR,
     MIN_STARTING_HR,
-    RESTING_HR as ATHLETE_RHR,  # noqa: F401 – ponecháno pro dopočty mimo zóny
+    TRIMP_K1,
+    TRIMP_K2,
     WARMUP_SECONDS,
+)
+from config.settings import (
+    MAX_HR as ATHLETE_MAX_HR,
+)
+from config.settings import (
     ZONES as ATHLETE_ZONES,
+)
+from src.ingestion.sport import (
+    EBIKE_SPORT_PATTERN,
+    cardio_mask,
+    is_cardio_sport,
+    is_cycling_sport,
 )
 from src.physio.hr_curve import max_mean_curve
 from src.physio.hr_stream import to_second_grid
@@ -66,8 +77,6 @@ try:
 except ImportError:  # pragma: no cover - závisí na prostředí
     HAS_NEUROKIT = False
 
-# Sporty způsobilé pro drift / EF / max_hrr_60s
-CARDIO_SPORTS = ("running", "cycling")
 MIN_DURATION_DRIFT_MIN = 20
 
 # Max HRR: převzorkování na 1 s, interpolace max 30 s díry, okno 60 s
@@ -137,17 +146,27 @@ def cardiac_drift(tdata: pd.DataFrame, sport: str) -> Optional[float]:
     """
     Přeskočí 10min rozjezd, zbytek rozdělí časovým středem na dvě poloviny.
 
-    Kolo: EF = power/HR (rychlost je na kole funkcí terénu, ne formy).
-    Běh:  EF = speed/HR, ale jen na rovině a jen v Z1/Z2 – do kopce a
-          v intervalech je vztah rychlost↔tep rozbitý gravitací a laktátem.
+    Kolo s wattmetrem: EF = power/HR (rychlost je na kole funkcí terénu).
+    Kolo bez wattmetru i běh: EF = speed/HR, ale jen na rovině – do kopce
+          je vztah rychlost↔tep rozbitý gravitací. U běhu navíc jen v Z1/Z2,
+          protože intervaly ten vztah rozbíjejí laktátem.
+
+    Bez fallbacku na speed vycházel drift None pro celou databázi jízd bez
+    wattmetru (18 z 884 aktivit mělo hodnotu); na rovné jízdě je speed/HR
+    použitelný signál decouplingu.
 
     Drift = (EF_1 − EF_2) / EF_1 × 100 [%]
     """
     if tdata.empty:
         return None
 
-    is_cycling = "cycling" in sport or "bike" in sport
-    effort_col = "power" if is_cycling else "speed"
+    is_cycling = is_cycling_sport(sport)
+    has_power = (
+        "power" in tdata.columns
+        and pd.to_numeric(tdata["power"], errors="coerce").fillna(0).gt(0).sum() >= 20
+    )
+    effort_col = "power" if (is_cycling and has_power) else "speed"
+    on_speed = effort_col == "speed"
     if effort_col not in tdata.columns:
         return None
 
@@ -167,15 +186,16 @@ def cardiac_drift(tdata: pd.DataFrame, sport: str) -> Optional[float]:
     if len(post) < 20:
         return None
 
-    # Rovinatost (jen běh)
-    if not is_cycling and "altitude" in post.columns:
+    # Rovinatost – vždy, když se počítá ze speed (terén plete speed/HR bez
+    # ohledu na sport), ne jen u běhu.
+    if on_speed and "altitude" in post.columns:
         alt_vals = pd.to_numeric(post["altitude"], errors="coerce").dropna()
         if len(alt_vals) >= 10:
             if float(alt_vals.max() - alt_vals.min()) > CARDIAC_DRIFT_MAX_ALT_RANGE_M:
                 return None
 
-    # Ustálený stav Z1/Z2 (jen běh)
-    if not is_cycling and "hr_zone" in post.columns:
+    # Ustálený stav Z1/Z2 (jen běh – cyklista jede rovnoměrné tempo i v Z3).
+    if on_speed and not is_cycling and "hr_zone" in post.columns:
         post = post.loc[post["hr_zone"].isin(["Z1", "Z2", ""])]
         if len(post) < 20:
             return None
@@ -195,18 +215,30 @@ def cardiac_drift(tdata: pd.DataFrame, sport: str) -> Optional[float]:
     if hr1 == 0 or hr2 == 0:
         return None
 
-    if is_cycling:
+    if effort_col == "power":
         if eff1 < 30 or eff2 < 30:  # W – volnoběh nemá vypovídací hodnotu
             return None
     else:
         if eff1 < 2.0 / 3.6 or eff2 < 2.0 / 3.6:  # < 2 km/h
+            return None
+        # Steady-state pojistka pro speed: decoupling má smysl jen na
+        # rovnoměrném úsilí. Když se průměrná rychlost mezi půlkami liší
+        # o víc než 25 %, jde o změnu tempa (semafory, skupina, defekt),
+        # ne o kardiovaskulární drift – speed/HR je na kole moc citlivý
+        # na vítr, drafting a zastávky, než aby se to dalo rozlišit jinak.
+        if not (0.75 <= eff2 / eff1 <= 1.334):
             return None
 
     ef1 = safe_div(eff1, hr1)
     ef2 = safe_div(eff2, hr2)
     if ef1 is None or ef1 == 0 or np.isnan(ef1):
         return None
-    return round((ef1 - ef2) / ef1 * 100.0, 2)
+    drift = round((ef1 - ef2) / ef1 * 100.0, 2)
+    # Fyziologicky možný rozsah decouplingu. Mimo něj to není drift, ale
+    # artefakt dělení (jedna půlka skoro stála) – hlavně na speed fallbacku.
+    if effort_col == "speed" and not (-25.0 <= drift <= 40.0):
+        return None
+    return drift
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -272,12 +304,21 @@ def durability(tdata: pd.DataFrame, sport: str) -> Optional[float]:
 
     Durability = (EF_2 / EF_1 − 1) × 100. Záporné číslo znamená pokles
     výkonu při stejném tepu, tedy únavu.
+
+    Kolo bez wattmetru spadne na speed/HR – ale jen na rovině, jinak by
+    profil trasy převážil únavu. Bez fallbacku měla durabilitu jen hrstka
+    jízd s power daty (3 z 884).
     """
     if tdata.empty:
         return None
 
-    is_cycling = "cycling" in sport or "bike" in sport
-    effort_col = "power" if is_cycling else "speed"
+    is_cycling = is_cycling_sport(sport)
+    has_power = (
+        "power" in tdata.columns
+        and pd.to_numeric(tdata["power"], errors="coerce").fillna(0).gt(0).sum() >= 20
+    )
+    effort_col = "power" if (is_cycling and has_power) else "speed"
+    on_speed = effort_col == "speed"
     if effort_col not in tdata.columns:
         return None
 
@@ -296,6 +337,12 @@ def durability(tdata: pd.DataFrame, sport: str) -> Optional[float]:
     if (t_end - t0).total_seconds() / 60.0 < DURABILITY_MIN_DURATION_MIN:
         return None
 
+    # Rovinatost, když se počítá ze speed – profil trasy jinak přebije únavu.
+    if on_speed and "altitude" in active.columns:
+        alt_vals = pd.to_numeric(active["altitude"], errors="coerce").dropna()
+        if len(alt_vals) >= 10 and float(alt_vals.max() - alt_vals.min()) > CARDIAC_DRIFT_MAX_ALT_RANGE_M:
+            return None
+
     t_mid = t0 + (t_end - t0) / 2
     h1 = active[active["timestamp"] <= t_mid]
     h2 = active[active["timestamp"] > t_mid]
@@ -306,7 +353,7 @@ def durability(tdata: pd.DataFrame, sport: str) -> Optional[float]:
     eff1, eff2 = h1[effort_col].mean(), h2[effort_col].mean()
     if hr1 == 0 or hr2 == 0:
         return None
-    if is_cycling:
+    if effort_col == "power":
         if eff1 < 30 or eff2 < 30:
             return None
     else:
@@ -452,10 +499,15 @@ def dfa_alpha1_thresholds(rr_ms: list[float] | None, tdata: pd.DataFrame) -> dic
             continue
         avg_hr = 60000.0 / np.mean(window)
         try:
-            alpha1, _ = nk.fractal_dfa(window, scale=DFA_BOX_SIZES)
+            # neurokit2 >= 0.2 vrací (alpha: float, info: dict) pro
+            # multifractal=False; starší (alpha, _). Ověřeno na 0.2.13.
+            # `.item()` sundá případný 0-d ndarray, ať `np.isfinite` nespadne.
+            dfa_out = nk.fractal_dfa(window, scale=DFA_BOX_SIZES)
+            alpha1 = float(np.asarray(dfa_out[0]).reshape(-1)[0])
             if np.isfinite(alpha1) and 0.0 < alpha1 < 2.0:
                 hr_alpha_pairs.append((avg_hr, alpha1))
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 – jedno vadné okno běh neshodí
+            log.debug("DFA okno přeskočeno: %s", exc)
             continue
 
     if len(hr_alpha_pairs) < 10:
@@ -509,10 +561,17 @@ def dfa_alpha1_thresholds(rr_ms: list[float] | None, tdata: pd.DataFrame) -> dic
 
 def respiration_from_rr(rr_ms: list[float] | None) -> Optional[float]:
     """
-    Dechová frekvence z respirační sinusové arytmie.
+    Dechová frekvence z respirační sinusové arytmie. EXPERIMENTÁLNÍ.
 
     HF složka variability R-R (0.15–0.50 Hz) odpovídá dechové modulaci
     tepu; vrchol v tomto pásmu × 60 = dechů za minutu.
+
+    POZOR: na reálných datech vychází 9–13 dech/min, tzn. přilepené na dolní
+    hranici pásma (0.15 Hz = 9/min) – metoda zjevně jen vybírá nejnižší koš,
+    ne skutečný dechový vrchol. Metrika se dál počítá a ukládá, ale je
+    vyřazená z master exportu (viz exports.EXPERIMENTAL_ACTIVITY_COLUMNS) a
+    nemá se z ní usuzovat. Kandidát na přepracování (jiné pásmo / metoda)
+    nebo úplné odstranění.
     """
     if not HAS_NEUROKIT or not rr_ms or len(rr_ms) < 120:
         return None
@@ -632,7 +691,11 @@ def compute_vam(df: pd.DataFrame) -> pd.DataFrame:
     climb_time = uphill.where(uphill > 0, dur / 2.0)
 
     sport_col = df["sport"].astype(str).str.lower().fillna("")
-    is_vam_sport = sport_col.str.contains("|".join(VAM_SPORTS), na=False)
+    # Elektrokolo ven – nahoru veze motor, VAM by měřil asistenci, ne výkon
+    # (stejný důvod jako u sjezdovky s lanovkou).
+    is_vam_sport = sport_col.str.contains("|".join(VAM_SPORTS), na=False) & ~sport_col.str.contains(
+        EBIKE_SPORT_PATTERN, na=False
+    )
     if not is_vam_sport.any():
         return df
 
@@ -697,11 +760,14 @@ def compute_critical_hr(df: pd.DataFrame) -> pd.DataFrame:
     if "sport" not in df.columns or df.empty:
         return df
 
-    cardio_mask = df["sport"].str.contains("|".join(CARDIO_SPORTS), case=False, na=False)
+    # Elektrokolo ven z populace pro práh – dlouhá jízda s asistencí drží nízký
+    # průměrný tep a stáhla by 85. percentil. tati_score se elektru níž počítá
+    # dál (čas v Z4/Z5 je skutečná tepová zátěž).
+    is_cardio = cardio_mask(df["sport"])
     avg_hr = pd.to_numeric(df.get("avg_hr"), errors="coerce")
     dur_min = pd.to_numeric(df.get("duration_minutes"), errors="coerce")
 
-    eligible = df.loc[cardio_mask & avg_hr.notna() & (dur_min >= 20)]
+    eligible = df.loc[is_cardio & avg_hr.notna() & (dur_min >= 20)]
     if len(eligible) < CHR_MIN_ACTIVITIES:
         return df
 
@@ -748,19 +814,20 @@ def compute_trimp_load_percentile(df: pd.DataFrame) -> pd.DataFrame:
     Stejná populace jako u ``compute_critical_hr`` (běh + kolo), ne jen
     kolo – i běžecká zátěž patří do srovnání "jak těžký byl tenhle trénink
     vůči zbytku", a rozdělovat podle sportu by při pár desítkách běhů dalo
-    šumový percentil.
+    šumový percentil. Elektrokolo se tu NEvylučuje: jeho TRIMP je skutečná
+    zátěž a do srovnání "jak těžký byl trénink" patří.
     """
     df = df.copy()
     df["trimp_load_percentile"] = np.nan
     if "sport" not in df.columns or df.empty:
         return df
 
-    cardio_mask = df["sport"].str.contains("|".join(CARDIO_SPORTS), case=False, na=False)
+    is_cardio = cardio_mask(df["sport"], exclude_ebike=False)
     trimp = pd.to_numeric(df.get("trimp_adjusted"), errors="coerce")
     if "total_trimp" in df.columns:
         trimp = trimp.fillna(pd.to_numeric(df["total_trimp"], errors="coerce"))
 
-    eligible = cardio_mask & trimp.notna()
+    eligible = is_cardio & trimp.notna()
     if eligible.sum() < CHR_MIN_ACTIVITIES:
         return df
 
@@ -819,11 +886,13 @@ def compute_trimp_from_records(tdata: pd.DataFrame, rhr: float) -> Optional[floa
 
     df = tdata.sort_values("timestamp")
     # ffill(limit=15) zrcadlí hr_effective v parseru – viz docstring.
-    hr = (
-        pd.to_numeric(df["heart_rate"], errors="coerce")
-        .ffill(limit=15)
-        .to_numpy(dtype=float)
+    # Implausibilní vzorek se zahodí PŘED ffillem, ať se glitch nešíří dál
+    # (parser dělá totéž přes _plausible_hr).
+    hr_raw = pd.to_numeric(df["heart_rate"], errors="coerce")
+    hr_raw = hr_raw.where(
+        (hr_raw >= HR_PLAUSIBLE_MIN_BPM) & (hr_raw <= HR_PLAUSIBLE_MAX_BPM)
     )
+    hr = hr_raw.ffill(limit=15).to_numpy(dtype=float)
 
     # Časový krok mezi záznamy, stejně jako v parseru: strop 120 s brání
     # tomu, aby dlouhá pauza v nahrávání nafoukla zátěž.
@@ -888,12 +957,20 @@ def compute_best_hr_windows(
 
 
 def is_series_eligible(sport: str | None, duration_minutes: float | None) -> bool:
-    """Vteřinová analýza má smysl jen u kardio aktivit delších než 20 min."""
+    """
+    Vteřinová analýza má smysl jen u kardio aktivit delších než 20 min.
+
+    Elektrokolo je vyloučené: drift, DFA prahy, tepová křivka i HRR stojí na
+    vztahu výkon/rychlost ↔ tep, který motor rozbíjí. TRIMP a minuty v zónách
+    se počítají jinde (parser), takže elektro dál přispívá do formy.
+    """
     if not sport or duration_minutes is None or pd.isna(duration_minutes):
         return False
     if duration_minutes < MIN_DURATION_DRIFT_MIN:
         return False
-    return any(s in str(sport).lower() for s in CARDIO_SPORTS)
+    # is_cardio_sport už elektrokolo vylučuje; drží i MTB / gravel / "Ride"
+    # ze Stravy, které holé `"cycling" in sport` míjelo.
+    return is_cardio_sport(sport)
 
 
 def compute_activity_series_metrics(
