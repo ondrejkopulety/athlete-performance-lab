@@ -115,6 +115,9 @@ class ActivityOut(BaseModel):
 
 class ActivityDetailOut(ActivityOut):
     max_speed_kmh: float | None = None
+    uphill_minutes: float | None = None
+    downhill_minutes: float | None = None
+    flat_minutes: float | None = None
     cardiac_drift: float | None = None
     max_hrr_60s: float | None = None
     durability_pct: float | None = None
@@ -242,15 +245,26 @@ class DashboardRide(BaseModel):
 
 
 class DashboardActivity(BaseModel):
-    """Odlehčený řádek pro grafy zón, stoupání a zotavovacího tepu."""
+    """
+    Odlehčený řádek pro grafy zón, stoupání, zotavovacího tepu a stránku
+    Stats (souhrny za období, terénní a nutriční rozklad) – jediný seznam
+    aktivit v dashboardu, který nemá historický limit.
+    """
 
     id: str
     d: date
     z: list[float]
     up: float | None = None       # minuty do kopce
+    down: float | None = None     # minuty z kopce
+    flat: float | None = None     # minuty po rovině
     asc: float | None = None
     grad: float | None = None     # průměrný sklon stoupání v %
     hrr: float | None = None      # max. pokles tepu za 60 s
+    km: float | None = None
+    dur: float | None = None      # minuty
+    kcal: float | None = None
+    fat: float | None = None      # g tuků spálených při aktivitě
+    carb: float | None = None     # g cukrů spálených při aktivitě
     # Nezáměrná Z3 v sekundách: čas v Z3 mimo souvislé bloky. None = bloky
     # pro tuhle aktivitu ještě spočítané nejsou, což není nula.
     z3u: int | None = None

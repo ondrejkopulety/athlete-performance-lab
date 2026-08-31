@@ -9,6 +9,8 @@ export type Range = number | "ytd" | "all" | string; // string = "2024"
 
 export interface RangeOption {
   label: string;
+  /** Dlouhý popisek do rozbalovacího menu ("7 dní", "1 měsíc", "Celá historie"). */
+  full: string;
   value: Range;
 }
 
@@ -28,14 +30,14 @@ export function rangeOptions(days: Day[]): RangeOption[] {
     .reverse();
 
   return [
-    { label: "7D", value: 7 },
-    { label: "14D", value: 14 },
-    { label: "1M", value: 30 },
-    { label: "3M", value: 90 },
-    { label: "6M", value: 180 },
-    { label: "Letos", value: "ytd" },
-    ...years.map((y) => ({ label: y, value: y })),
-    { label: "Vše", value: "all" },
+    { label: "7D", full: "7 dní", value: 7 },
+    { label: "14D", full: "14 dní", value: 14 },
+    { label: "1M", full: "1 měsíc", value: 30 },
+    { label: "3M", full: "3 měsíce", value: 90 },
+    { label: "6M", full: "6 měsíců", value: 180 },
+    { label: "Letos", full: "Letos", value: "ytd" },
+    ...years.map((y) => ({ label: y, full: y, value: y })),
+    { label: "Vše", full: "Celá historie", value: "all" },
   ];
 }
 

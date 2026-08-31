@@ -1,7 +1,66 @@
-/* Barvy a základ stránky – převzato 1:1 z designu (helmet blok
-   "Fitness Dashboard design/Readiness Dashboard.dc.html"). */
+/* Barvy a základ stránky – převzato 1:1 z design systému
+   "Dashboard 2.0/tokens/*.css" (colors + typography + spacing + radius). */
 
 :root {
+  /* Typografie */
+  --font-sans: 'DM Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --fs-9: 9px;
+  --fs-10: 10px;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+  --fs-20: 20px;
+  --fs-22: 22px;
+  --fs-26: 26px;
+  --fs-30: 30px;
+  --fs-34: 34px;
+  --fs-38: 38px;
+  --fs-56: 56px;
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-bold: 700;
+
+  /* Rozestupy – mřížka 4px */
+  --sp-2: 2px;
+  --sp-4: 4px;
+  --sp-6: 6px;
+  --sp-8: 8px;
+  --sp-10: 10px;
+  --sp-12: 12px;
+  --sp-14: 14px;
+  --sp-16: 16px;
+  --sp-20: 20px;
+  --sp-24: 24px;
+  --sp-28: 28px;
+  --sp-32: 32px;
+  --sp-40: 40px;
+  --sp-44: 44px;
+  --sp-48: 48px;
+  --sp-96: 96px;
+
+  /* Zaoblení */
+  --r-2: 2px;
+  --r-3: 3px;
+  --r-4: 4px;
+  --r-6: 6px;
+  --r-8: 8px;
+  --r-9: 9px;
+  --r-10: 10px;
+  --r-12: 12px;
+  --r-14: 14px;
+  --r-16: 16px;
+  --r-18: 18px;
+  --r-22: 22px;
+  --r-pill: 999px;
+  --r-circle: 50%;
+
+  /* Barvy – tmavý motiv (výchozí) */
   --bg: #09090b;
   --card: #0c0c0f;
   --card2: #0e0e11;
@@ -18,9 +77,12 @@
   --warn: #facc15;
   --bad: #f43f5e;
   --orange: #fb923c;
+  --orange2: #f97316;
   --blue: #38bdf8;
   --blue2: #60a5fa;
   --z1: #3f7a8c;
+  --fatc: #facc15;
+  --carbc: #38bdf8;
 }
 
 [data-theme="light"] {
@@ -40,9 +102,12 @@
   --warn: #b07d1a;
   --bad: #bf5a5a;
   --orange: #c47238;
+  --orange2: #bd6a2c;
   --blue: #4a83a6;
   --blue2: #5b7fb5;
   --z1: #9dc4d6;
+  --fatc: #b07d1a;
+  --carbc: #4a83a6;
 }
 
 html,
@@ -54,8 +119,53 @@ body {
   transition: background 0.35s ease;
 }
 
+/* Nikde nezobrazovat viditelný scrollbar stránky (viz Dashboard 2.0/CLAUDE.md). */
+html {
+  scrollbar-width: none;
+}
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  display: none;
+}
+
 * {
   box-sizing: border-box;
+}
+
+/* Detail jízdy má vlastní paletu mapy a 5stupňovou rampu zón –
+   záměrně mimo sdílené tokeny (viz Dashboard 2.0/readme.md). */
+[data-screen="activity"] {
+  --z1: #4ade80;
+  --z2: #60a5fa;
+  --z3: #facc15;
+  --z4: #fb923c;
+  --z5: #f43f5e;
+  --mapbg: #101216;
+  --road: #1c2027;
+  --water: #16232e;
+  --panel: rgba(9, 9, 11, 0.82);
+  --maplabel: #8a929e;
+  --pin: #0c0e12;
+  --grid: #2a2a30;
+  --skel: #22222a;
+  --sel: #facc1533;
+}
+[data-theme="light"] [data-screen="activity"],
+[data-screen="activity"][data-theme="light"] {
+  --z1: #5f8a2a;
+  --z2: #4a83a6;
+  --z3: #b07d1a;
+  --z4: #c47238;
+  --z5: #bf5a5a;
+  --mapbg: #e6e4de;
+  --road: #d3d0c8;
+  --water: #bcd0da;
+  --panel: rgba(247, 246, 244, 0.86);
+  --maplabel: #5f5d57;
+  --pin: #f7f6f4;
+  --grid: #cfccc4;
+  --skel: #e9e7e1;
+  --sel: #b07d1a33;
 }
 
 a {

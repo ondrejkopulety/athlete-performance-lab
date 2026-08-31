@@ -56,6 +56,9 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 
+# ---------- Design reference (lokální, ~5 MB PNG – neverzuje se) ----------
+Dashboard 2.0/
+
 # ---------- OS & IDE ----------
 .DS_Store
 Thumbs.db

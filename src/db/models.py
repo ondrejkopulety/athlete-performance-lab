@@ -81,6 +81,10 @@ class Activity(Base):
     max_speed_kmh: Mapped[float | None] = mapped_column(Float)
     calories: Mapped[float | None] = mapped_column(Float)
     uphill_minutes: Mapped[float | None] = mapped_column(Float)
+    # Symetrie k uphill_minutes – stejný FIT parser, stejná definice pohybu
+    # (is_active & spd>0), jen podle znaménka změny nadmořské výšky.
+    downhill_minutes: Mapped[float | None] = mapped_column(Float)
+    flat_minutes: Mapped[float | None] = mapped_column(Float)
 
     # Senzory
     avg_cadence: Mapped[float | None] = mapped_column(Float)

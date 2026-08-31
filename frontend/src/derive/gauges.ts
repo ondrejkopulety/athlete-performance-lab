@@ -8,9 +8,25 @@
  * se tady počítají z něj a posouvají se s formou.
  */
 
-import type { Biometric, Today } from "../api";
+import type { Biometric } from "../api";
 import { dec, fmtShort } from "../format";
 import type { Theme } from "../theme";
+
+/**
+ * Zdroj hodnot pro ukazatele – buď dnešní `Today` z `/api/dashboard`, nebo
+ * řádek `DailyRow` z `/api/daily` vybraný denním stepperem. Obě struktury
+ * nesou stejná pole ranní biometrie, tak stačí strukturální podmnožina.
+ */
+export interface GaugeSource {
+  date?: string;
+  hrv_last_night?: number | null;
+  hrv_weekly_avg?: number | null;
+  rhr_day?: number | null;
+  rhr_baseline_14d?: number | null;
+  sleep_duration_min?: number | null;
+  sleep_need_min?: number | null;
+  whoop_strain?: number | null;
+}
 
 export interface Gauge {
   name: string;
@@ -28,6 +44,8 @@ export interface Gauge {
   by1: string;
   bx2: string;
   by2: string;
+  /** Odkaz na drilldown obrazovku (Strain nikam nevede). */
+  href: string | null;
 }
 
 const R = 26;
@@ -53,6 +71,7 @@ interface Spec {
   delta: string;
   deltaColor: string;
   ideal: string;
+  href: string | null;
   /** Pod pásmem jen varování, ne poplach (nízký strain není chyba). */
   softLow?: boolean;
 }
@@ -99,6 +118,7 @@ function build(spec: Spec, theme: Theme, mounted: boolean): Gauge {
     by1: by1.toFixed(1),
     bx2: bx2.toFixed(1),
     by2: by2.toFixed(1),
+    href: spec.href,
   };
 }
 
@@ -125,7 +145,7 @@ function pick(
 
 export function buildGauges(
   theme: Theme,
-  today: Today | null,
+  today: GaugeSource | null,
   lastKnown: Record<"hrv" | "rhr" | "sleep", Biometric | null>,
   mounted: boolean,
 ): Gauge[] {
@@ -181,6 +201,7 @@ export function buildGauges(
         delta: hrvDelta,
         deltaColor: theme.bad,
         ideal: hrvBand ? `${Math.round(hrvBand[0])}–${Math.round(hrvBand[1])} ms` : "–",
+        href: "/hrv",
       },
       theme,
       mounted,
@@ -197,6 +218,7 @@ export function buildGauges(
         delta: rhrDelta,
         deltaColor: theme.bad,
         ideal: rhrBand ? `${Math.round(rhrBand[0])}–${Math.round(rhrBand[1])} tep` : "–",
+        href: "/rhr",
       },
       theme,
       mounted,
@@ -213,6 +235,7 @@ export function buildGauges(
         delta: sleepDelta,
         deltaColor: theme.warn,
         ideal: `${fmtShort(SLEEP_BAND[0])}–${fmtShort(SLEEP_BAND[1])}`,
+        href: "/spanek",
       },
       theme,
       mounted,
@@ -229,6 +252,7 @@ export function buildGauges(
         delta: "za 24 h",
         deltaColor: theme.faint,
         ideal: "8–14",
+        href: null,
         softLow: true,
       },
       theme,

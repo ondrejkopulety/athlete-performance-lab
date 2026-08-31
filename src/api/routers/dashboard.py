@@ -134,6 +134,8 @@ def dashboard(session: Session = Depends(get_session)) -> DashboardOut:
             Activity.total_trimp,
             Activity.calories,
             Activity.uphill_minutes,
+            Activity.downhill_minutes,
+            Activity.flat_minutes,
             Activity.time_in_z1,
             Activity.time_in_z2,
             Activity.time_in_z3,
@@ -141,6 +143,8 @@ def dashboard(session: Session = Depends(get_session)) -> DashboardOut:
             Activity.time_in_z5,
             ActivityMetrics.avg_gradient_pct,
             ActivityMetrics.max_hrr_60s,
+            ActivityMetrics.fat_g,
+            ActivityMetrics.carb_g,
         )
         .outerjoin(ActivityMetrics, ActivityMetrics.activity_id == Activity.activity_id)
         .where(Activity.sport.op("~*")(CYCLING_SPORT_PATTERN))
@@ -182,9 +186,16 @@ def dashboard(session: Session = Depends(get_session)) -> DashboardOut:
                 _zero(r.time_in_z5),
             ],
             up=_num(r.uphill_minutes),
+            down=_num(r.downhill_minutes),
+            flat=_num(r.flat_minutes),
             asc=_num(r.ascent_m),
             grad=_num(r.avg_gradient_pct),
             hrr=_num(r.max_hrr_60s),
+            km=_num(r.distance_km),
+            dur=_num(r.duration_minutes),
+            kcal=_num(r.calories),
+            fat=_num(r.fat_g),
+            carb=_num(r.carb_g),
             z3u=_z3_unintentional(r.activity_id),
             cov=_coverage(coverage.get(r.activity_id)),
         )

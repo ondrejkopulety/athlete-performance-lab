@@ -68,9 +68,17 @@ export interface ActivityRow {
   d: string;
   z: number[];
   up: number | null;
+  /** Minuty z kopce / po rovině – symetrie k `up`, viz fit_parser.py. */
+  down: number | null;
+  flat: number | null;
   asc: number | null;
   grad: number | null;
   hrr: number | null;
+  km: number | null;
+  dur: number | null;
+  kcal: number | null;
+  fat: number | null;
+  carb: number | null;
   /** Nezáměrná Z3 v sekundách; null = bloky ještě spočítané nejsou (≠ 0). */
   z3u: number | null;
   cov: Coverage | null;
@@ -309,6 +317,120 @@ export async function fetchActivityRecords(
     `/activities/${encodeURIComponent(id)}/records?resolution=${resolution}`,
     signal,
   );
+}
+
+// ── Denní řada pro krokování dnů na Přehledu ─────────────────────────────────
+
+/**
+ * Podmnožina `/api/daily` (celý `DailyMetricsOut` řádek), kterou potřebuje
+ * denní stepper na Přehledu – readiness, ranní biometrie a doporučení pro
+ * libovolný minulý den. `/api/dashboard.days` nese jen PMC, tohle je navíc.
+ */
+export interface DailyRow {
+  date: string;
+  readiness_score: number | null;
+  hrv_last_night: number | null;
+  hrv_weekly_avg: number | null;
+  rhr_day: number | null;
+  rhr_baseline_14d: number | null;
+  sleep_duration_min: number | null;
+  sleep_need_min: number | null;
+  sleep_score_day: number | null;
+  whoop_strain: number | null;
+  coach_advice: string | null;
+}
+
+export async function fetchDaily(
+  params: { from?: string; to?: string } = {},
+  signal?: AbortSignal,
+): Promise<DailyRow[]> {
+  const q = new URLSearchParams();
+  if (params.from) q.set("from", params.from);
+  if (params.to) q.set("to", params.to);
+  const qs = q.toString();
+  return get<DailyRow[]>(`/daily${qs ? `?${qs}` : ""}`, signal);
+}
+
+// ── Seznam aktivit pro kalendář (Aktivity) ──────────────────────────────────
+
+/** Řádek z `/api/activities` – na rozdíl od `/api/dashboard` nese `sport`
+ *  a všechny sporty (ne jen kolo). */
+export interface ActivityListRow {
+  activity_id: string;
+  date: string;
+  start_time: string | null;
+  activity_name: string | null;
+  sport: string | null;
+  duration_minutes: number | null;
+  total_trimp: number | null;
+  avg_hr: number | null;
+  max_hr: number | null;
+  distance_km: number | null;
+  ascent_m: number | null;
+  descent_m: number | null;
+  avg_speed_kmh: number | null;
+  calories: number | null;
+  time_in_z1: number | null;
+  time_in_z2: number | null;
+  time_in_z3: number | null;
+  time_in_z4: number | null;
+  time_in_z5: number | null;
+  source: string | null;
+}
+
+export async function fetchActivities(
+  params: { from?: string; to?: string; sport?: string; limit?: number },
+  signal?: AbortSignal,
+): Promise<ActivityListRow[]> {
+  const q = new URLSearchParams();
+  if (params.from) q.set("from", params.from);
+  if (params.to) q.set("to", params.to);
+  if (params.sport) q.set("sport", params.sport);
+  if (params.limit) q.set("limit", String(params.limit));
+  return get<ActivityListRow[]>(`/activities?${q}`, signal);
+}
+
+/**
+ * Celá historie aktivit pro kalendář. Stahuje se po rocích – `/api/activities`
+ * má strop `limit` (500 na starším backendu), takže jeden dotaz na celou
+ * historii by nejstarší roky uřízl.
+ */
+export async function fetchActivityHistory(
+  startYear: number,
+  endYear: number,
+  signal?: AbortSignal,
+): Promise<ActivityListRow[]> {
+  const years: number[] = [];
+  for (let y = startYear; y <= endYear; y++) years.push(y);
+  const chunks = await Promise.all(
+    years.map((y) =>
+      fetchActivities({ from: `${y}-01-01`, to: `${y}-12-31`, limit: 500 }, signal),
+    ),
+  );
+  return chunks.flat();
+}
+
+// ── Historie metriky pro drilldown HRV / RHR ────────────────────────────────
+
+export interface MetricHistoryPoint {
+  date: string;
+  value: number | null;
+}
+
+export interface MetricHistoryPayload {
+  metric: string;
+  from: string;
+  to: string;
+  meta: Record<string, unknown> | null;
+  points: MetricHistoryPoint[];
+}
+
+export async function fetchMetricHistory(
+  metric: string,
+  days = 1825,
+  signal?: AbortSignal,
+): Promise<MetricHistoryPayload> {
+  return get<MetricHistoryPayload>(`/coach/history/${metric}?days=${days}`, signal);
 }
 
 export async function saveThreshold(body: {

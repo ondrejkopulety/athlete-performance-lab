@@ -107,8 +107,8 @@ SUMMARY_COLS = [
     "avg_cadence", "max_cadence", "avg_temp", "max_temp",
     # Výkonnostní (Garmin)
     "training_effect_aerobic", "training_effect_anaerobic", "vo2_max",
-    # Stoupání (pro VAM)
-    "uphill_minutes",
+    # Stoupání (pro VAM) a terénní rozklad jízdy
+    "uphill_minutes", "downhill_minutes", "flat_minutes",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -567,6 +567,8 @@ def parse_fit_file(
     records_count = 0
     active_seconds: float = 0.0        # čas is_active=True (pro správný výpočet duration)
     uphill_seconds: float = 0.0        # čas stoupání s pohybem (pro VAM)
+    downhill_seconds: float = 0.0      # čas klesání s pohybem
+    flat_seconds: float = 0.0          # čas beze změny nadmořské výšky s pohybem
     prev_alt: Optional[float] = None   # předchozí nadmořská výška pro detekci stoupání
 
     for idx, raw in enumerate(raw_records):
@@ -624,12 +626,18 @@ def parse_fit_file(
                 zone_times[zone] += seg_s / 60.0
             active_seconds += seg_s
 
-        # Uphill-time accumulator (used for VAM in athlete_analytics.py)
+        # Terénní rozklad jízdy (uphill se používá pro VAM v athlete_analytics.py,
+        # downhill/flat jen pro terénní přehled na Stats stránce webu). Stejná
+        # podmínka pohybu pro všechny tři, liší se jen znaménkem změny výšky.
         if (is_active
                 and alt is not None and prev_alt is not None
-                and alt > prev_alt
                 and spd is not None and spd > 0):
-            uphill_seconds += seg_s
+            if alt > prev_alt:
+                uphill_seconds += seg_s
+            elif alt < prev_alt:
+                downhill_seconds += seg_s
+            else:
+                flat_seconds += seg_s
         prev_alt = alt
 
         highres_writer.writerow({
@@ -812,6 +820,8 @@ def parse_fit_file(
         "vo2_max":            "",  # merged externally from data/summaries/vo2_max.csv
         # Stoupání (pro VAM)
         "uphill_minutes":     round(uphill_seconds / 60.0, 2),
+        "downhill_minutes":   round(downhill_seconds / 60.0, 2),
+        "flat_minutes":       round(flat_seconds / 60.0, 2),
     }
 
 

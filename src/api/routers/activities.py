@@ -32,7 +32,7 @@ def list_activities(
     date_from: date | None = Query(None, alias="from"),
     date_to: date | None = Query(None, alias="to"),
     sport: str | None = None,
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=2000),
     session: Session = Depends(get_session),
 ) -> list[Activity]:
     stmt = select(Activity)

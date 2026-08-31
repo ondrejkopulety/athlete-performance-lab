@@ -155,6 +155,8 @@ def _activity_row(res: dict) -> dict:
         "max_speed_kmh": _num(s.get("max_speed_kmh")),
         "calories": _num(s.get("calories")),
         "uphill_minutes": _num(s.get("uphill_minutes")),
+        "downhill_minutes": _num(s.get("downhill_minutes")),
+        "flat_minutes": _num(s.get("flat_minutes")),
         "avg_cadence": _num(s.get("avg_cadence")),
         "max_cadence": _num(s.get("max_cadence")),
         "avg_temp": _num(s.get("avg_temp")),

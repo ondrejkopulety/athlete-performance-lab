@@ -9,7 +9,7 @@
 
 import type { ActivityDetail, RecordPoint } from "../api";
 import { czDate, dec, fmtMin, fmtShort } from "../format";
-import { ZONE_SHORT, type Theme } from "../theme";
+import { ZONE_SHORT, type MapPalette, type Theme } from "../theme";
 
 // ── Hlavička a chipy ─────────────────────────────────────────────────────
 
@@ -213,7 +213,7 @@ export interface DetailMap {
  * cos(zeměpisná šířka) – na délce jedné jízdy je zkreslení zanedbatelné a
  * nemá smysl tahat do frontendu plnou mapovou projekci kvůli jedné trase.
  */
-export function buildMap(records: RecordPoint[], theme: Theme): DetailMap {
+export function buildMap(records: RecordPoint[], zones: MapPalette["zones"]): DetailMap {
   const pts = records
     .filter((r) => r.position_lat != null && r.position_long != null)
     .map((r) => ({ lat: r.position_lat as number, lon: r.position_long as number, zone: r.hr_zone }));
@@ -242,7 +242,7 @@ export function buildMap(records: RecordPoint[], theme: Theme): DetailMap {
 
   const colorFor = (zone: string | null) => {
     const idx = zone ? ZONE_INDEX[zone] : undefined;
-    return idx == null ? theme.mut : theme.zones[idx];
+    return idx == null ? "var(--maplabel)" : zones[idx];
   };
 
   const segments: MapSegment[] = [];
@@ -303,6 +303,8 @@ export interface DetailChart {
   timeAxis: string[];
   minEl: number | null;
   maxEl: number | null;
+  hrAvg: number | null;
+  spdAvg: number | null;
 }
 
 const HR_LO = 60;
@@ -331,6 +333,10 @@ export function buildChart(records: RecordPoint[], durationMin: number | null): 
   const elKnown = elVals.filter((v): v is number => v != null);
   const minEl = elKnown.length ? Math.min(...elKnown) : null;
   const maxEl = elKnown.length ? Math.max(...elKnown) : null;
+  const hrKnown = hrVals.filter((v): v is number => v != null);
+  const spdKnown = spdVals.filter((v): v is number => v != null);
+  const hrAvg = hrKnown.length ? hrKnown.reduce((a, b) => a + b, 0) / hrKnown.length : null;
+  const spdAvg = spdKnown.length ? spdKnown.reduce((a, b) => a + b, 0) / spdKnown.length : null;
   const elLo = minEl == null ? 0 : minEl - 10;
   const elHi = maxEl == null ? 100 : maxEl + 10;
 
@@ -343,5 +349,7 @@ export function buildChart(records: RecordPoint[], durationMin: number | null): 
     timeAxis: [0, 0.25, 0.5, 0.75, 1].map((f) => fmtShort((durationMin ?? 0) * f)),
     minEl: minEl == null ? null : Math.round(minEl),
     maxEl: maxEl == null ? null : Math.round(maxEl),
+    hrAvg: hrAvg == null ? null : Math.round(hrAvg),
+    spdAvg,
   };
 }

@@ -1,6 +1,6 @@
 /**
- * Vykreslí dashboard na serveru nad reálnou odpovědí API a zkontroluje,
- * že v HTML nezůstalo NaN/undefined a že projdou všechna období.
+ * Vykreslí Přehled i Trénink na serveru nad reálnou odpovědí API a
+ * zkontroluje, že v HTML nezůstalo NaN/undefined a že projdou všechna období.
  *
  * Náhrada za "kouknu se do prohlížeče" – ručně nikdo neproklikává všechny
  * rozsahy v obou motivech.
@@ -14,12 +14,14 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const API = process.argv[2] ?? "http://localhost:8000/api/dashboard";
+const DAILY_API = API.replace(/\/dashboard\/?$/, "/daily");
 
 const ENTRY = `
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 
 import { Dashboard } from "../src/Dashboard";
+import { Trenink } from "../src/Trenink";
 import { toDays } from "../src/api";
 import { buildClimb } from "../src/derive/climb";
 import { buildGauges } from "../src/derive/gauges";
@@ -29,13 +31,25 @@ import { buildPolarization, buildZoneTime, inRange } from "../src/derive/quality
 import { rangeOptions, selectWindow } from "../src/derive/ranges";
 import { THEMES } from "../src/theme";
 
-export function render(payload, theme, mounted) {
+export function renderDashboard(payload, daily, theme, mounted) {
   return renderToString(
     createElement(Dashboard, {
       payload,
+      dailySeries: daily,
       theme,
       mounted,
-      onToggleTheme: () => {},
+      onOpenMetric: () => {},
+    }),
+  );
+}
+
+export function renderTrenink(payload, theme, mounted) {
+  return renderToString(
+    createElement(Trenink, {
+      payload,
+      theme,
+      mounted,
+      thresholdVersion: 0,
       onOpenActivity: () => {},
     }),
   );
@@ -75,6 +89,14 @@ if (!res.ok) {
 }
 const payload = await res.json();
 
+let daily = [];
+try {
+  const dres = await fetch(DAILY_API);
+  if (dres.ok) daily = await dres.json();
+} catch {
+  /* stepper na Přehledu si poradí i bez plné řady */
+}
+
 // Bundle musí ležet uvnitř projektu, jinak si node nenajde react.
 const scriptsDir = fileURLToPath(new URL(".", import.meta.url));
 const dir = await mkdtemp(join(scriptsDir, "..", "node_modules", ".render-check-"));
@@ -104,11 +126,18 @@ const problems = [];
 
 for (const theme of ["dark", "light"]) {
   for (const mounted of [false, true]) {
-    const html = mod.render(payload, theme, mounted);
     const where = `${theme}/mounted=${mounted}`;
-    BAD.forEach((n) => html.includes(n) && problems.push(`${where}: HTML obsahuje ${n}`));
-    ["Dobré ráno", "Bilance zátěže", "Kvalita tréninku", "Poslední jízdy"].forEach(
-      (s) => html.includes(s) || problems.push(`${where}: chybí sekce „${s}"`),
+
+    const dash = mod.renderDashboard(payload, daily, theme, mounted);
+    BAD.forEach((n) => dash.includes(n) && problems.push(`${where}: Přehled obsahuje ${n}`));
+    ["Dobré ráno", "Bilance zátěže"].forEach(
+      (s) => dash.includes(s) || problems.push(`${where}: Přehledu chybí sekce „${s}"`),
+    );
+
+    const tren = mod.renderTrenink(payload, theme, mounted);
+    BAD.forEach((n) => tren.includes(n) && problems.push(`${where}: Trénink obsahuje ${n}`));
+    ["Kvalita tréninku", "Čas v zónách"].forEach(
+      (s) => tren.includes(s) || problems.push(`${where}: Tréninku chybí sekce „${s}"`),
     );
   }
 
@@ -121,7 +150,7 @@ for (const theme of ["dark", "light"]) {
 }
 
 console.log(
-  `\nDní: ${payload.days.length}, jízd: ${payload.rides.length}, aktivit: ${payload.activities.length}`,
+  `\nDní: ${payload.days.length}, jízd: ${payload.rides.length}, aktivit: ${payload.activities.length}, denní řada: ${daily.length}`,
 );
 
 if (problems.length) {

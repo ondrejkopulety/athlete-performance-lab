@@ -1,6 +1,7 @@
 /**
- * Graf bilance zátěže (CTL/ATL) a sloupce denní zátěže.
- * Geometrie, prahy barev i logika slučování do týdnů/měsíců jsou z designu.
+ * Graf bilance zátěže (CTL/ATL) a sloupce denní zátěže – 1:1 s Readiness
+ * Dashboard.dc.html. Křivky jsou vyhlazené (Catmull-Rom → kubické Bézier),
+ * podporuje srovnání s předchozím rokem a výběr úseku (brush).
  */
 
 import type { Day } from "../api";
@@ -10,7 +11,6 @@ import type { Theme } from "../theme";
 const W = 700;
 const H = 196;
 const PAD = 14;
-/** Výška SVG viewBoxu; popisky osy Y se do ní přepočítávají na procenta. */
 const VIEW_H = 220;
 
 export interface Bar {
@@ -27,18 +27,43 @@ export interface Pmc {
   ctlLine: string;
   atlLine: string;
   ctlArea: string;
-  atlArea: string;
+  ctlLineCompare: string;
   gridLines: { y: string }[];
   yTicks: { top: string; label: number }[];
   selX: string;
   selCtlY: string;
   selAtlY: string;
   selPct: string;
-  sel: { ctl: string; atl: string; tsb: string; acwr: string; label: string };
+  sel: { ctl: string; atl: string; tsb: string; acwr: string; ctlPrev: string; label: string };
   tsbColor: string;
+  showCompareLegend: boolean;
+  compareLegendYear: string;
+  brushX: string;
+  brushW: string;
+  brushOn: string;
   bars: Bar[];
   barsLabel: string;
   barMax: number;
+}
+
+/** Vyhlazená čára (Catmull-Rom → kubické Bézier) jako v designu. */
+function smoothLine(pts: [number, number][]): string {
+  if (pts.length < 3) {
+    return pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" ");
+  }
+  let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i === 0 ? i : i - 1];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2 < pts.length ? i + 2 : i + 1];
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += ` C${c1x.toFixed(1)} ${c1y.toFixed(1)} ${c2x.toFixed(1)} ${c2y.toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+  }
+  return d;
 }
 
 export function buildPmc(
@@ -47,25 +72,30 @@ export function buildPmc(
   selIdxAbs: number,
   days: Day[],
   theme: Theme,
+  compareRows: (Day | null)[] | null = null,
+  compareYearLabel = "",
+  brush: [number, number] | null = null,
 ): Pmc {
   if (rows.length === 0) {
     return emptyPmc(theme);
   }
 
   const selRow = days[selIdxAbs] ?? rows[rows.length - 1];
-  const values = rows.flatMap((r) => [r.ctl, r.atl]);
+  const compareValid = compareRows && compareRows.every((r) => r != null) ? (compareRows as Day[]) : null;
+  const values = rows
+    .flatMap((r) => [r.ctl, r.atl])
+    .concat(compareValid ? compareValid.map((r) => r.ctl) : []);
   const lo = Math.min(...values) - 8;
   const hi = Math.max(...values) + 8;
 
   const x = (i: number) => (rows.length === 1 ? W / 2 : (i / (rows.length - 1)) * W);
   const y = (v: number) => PAD + (1 - (v - lo) / (hi - lo)) * (H - PAD * 2);
-  const line = (key: "ctl" | "atl") =>
-    rows.map((r, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(r[key]).toFixed(1)}`).join(" ");
-  const area = (key: "ctl" | "atl") => `${line(key)} L${W} ${H} L0 ${H} Z`;
+  const line = (data: Day[], key: "ctl" | "atl") =>
+    smoothLine(data.map((r, i) => [x(i), y(r[key])]));
+  const area = (data: Day[], key: "ctl" | "atl") => `${line(data, key)} L${W} ${H} L0 ${H} Z`;
 
   const selIdx = selIdxAbs - startIdx;
 
-  // Sloupce: do 40 dní po dnech, do ~400 po týdnech, dál po čtyřech týdnech.
   const bucketDays = rows.length > 400 ? 28 : rows.length > 40 ? 7 : 1;
   const buckets: { trimp: number; first: Day; last: Day; has: boolean }[] = [];
   for (let i = 0; i < rows.length; i += bucketDays) {
@@ -97,12 +127,15 @@ export function buildPmc(
     dayIndex: days.findIndex((z) => z.d === b.last.d),
   }));
 
+  const brushLo = brush ? Math.max(0, Math.min(rows.length - 1, brush[0])) : 0;
+  const brushHi = brush ? Math.max(0, Math.min(rows.length - 1, brush[1])) : 0;
+
   return {
     empty: false,
-    ctlLine: line("ctl"),
-    atlLine: line("atl"),
-    ctlArea: area("ctl"),
-    atlArea: area("atl"),
+    ctlLine: line(rows, "ctl"),
+    atlLine: line(rows, "atl"),
+    ctlArea: area(rows, "ctl"),
+    ctlLineCompare: compareValid ? line(compareValid, "ctl") : "",
     gridLines: [0.25, 0.5, 0.75].map((f) => ({ y: (PAD + f * (H - PAD * 2)).toFixed(1) })),
     yTicks: [0.25, 0.5, 0.75].map((fr) => ({
       top: `${(((PAD + fr * (H - PAD * 2)) / VIEW_H) * 100).toFixed(1)}%`,
@@ -120,11 +153,18 @@ export function buildPmc(
       atl: dec(selRow.atl),
       tsb: signed(selRow.tsb),
       acwr: selRow.acwr == null ? "–" : dec(selRow.acwr, 2),
+      ctlPrev:
+        compareValid && compareValid[selIdx] ? dec(compareValid[selIdx].ctl) : "–",
       label: new Date(`${selRow.d}T12:00:00`)
         .toLocaleDateString("cs-CZ", { day: "numeric", month: "short" })
         .toUpperCase(),
     },
     tsbColor: selRow.tsb > 5 ? theme.ok : selRow.tsb < -20 ? theme.bad : theme.fg2,
+    showCompareLegend: !!compareValid,
+    compareLegendYear: compareYearLabel,
+    brushX: x(brushLo).toFixed(1),
+    brushW: Math.max(1, x(brushHi) - x(brushLo)).toFixed(1),
+    brushOn: brush ? "1" : "0",
     bars,
     barsLabel:
       bucketDays > 7
@@ -142,15 +182,20 @@ function emptyPmc(theme: Theme): Pmc {
     ctlLine: "",
     atlLine: "",
     ctlArea: "",
-    atlArea: "",
+    ctlLineCompare: "",
     gridLines: [],
     yTicks: [],
     selX: "-10",
     selCtlY: "-10",
     selAtlY: "-10",
     selPct: "50%",
-    sel: { ctl: "–", atl: "–", tsb: "–", acwr: "–", label: "" },
+    sel: { ctl: "–", atl: "–", tsb: "–", acwr: "–", ctlPrev: "–", label: "" },
     tsbColor: theme.fg2,
+    showCompareLegend: false,
+    compareLegendYear: "",
+    brushX: "-10",
+    brushW: "0",
+    brushOn: "0",
     bars: [],
     barsLabel: "Denní zátěž · TRIMP",
     barMax: 0,

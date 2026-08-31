@@ -30,7 +30,7 @@ export interface Theme {
 
 export const THEMES: Record<ThemeName, Theme> = {
   dark: {
-    bg: "#0c0c0f",
+    bg: "#09090b",
     card: "#0c0c0f",
     line: "#17171a",
     lineOn: "#2e2e35",
@@ -51,7 +51,7 @@ export const THEMES: Record<ThemeName, Theme> = {
     zones: ["#3f7a8c", "#38bdf8", "#a3e635", "#fb923c", "#f43f5e"],
   },
   light: {
-    bg: "#f7f6f4",
+    bg: "#eeedea",
     card: "#f7f6f4",
     line: "#dedcd6",
     lineOn: "#c4c2b9",
@@ -70,6 +70,36 @@ export const THEMES: Record<ThemeName, Theme> = {
     blue: "#4a83a6",
     blue2: "#5b7fb5",
     zones: ["#9dc4d6", "#4a83a6", "#5f8a2a", "#c47238", "#bf5a5a"],
+  },
+};
+
+/**
+ * Paleta mapy v detailu jízdy. V designu je screen-specific (mimo sdílené
+ * tokeny) – v CSS je jako `[data-screen="activity"]`, tady kvůli SVG stringům
+ * skládaným v JS (`derive/activityDetail.ts`).
+ */
+export interface MapPalette {
+  mapbg: string;
+  road: string;
+  water: string;
+  pin: string;
+  zones: [string, string, string, string, string];
+}
+
+export const MAP_PALETTE: Record<ThemeName, MapPalette> = {
+  dark: {
+    mapbg: "#101216",
+    road: "#1c2027",
+    water: "#16232e",
+    pin: "#0c0e12",
+    zones: ["#4ade80", "#60a5fa", "#facc15", "#fb923c", "#f43f5e"],
+  },
+  light: {
+    mapbg: "#e6e4de",
+    road: "#d3d0c8",
+    water: "#bcd0da",
+    pin: "#f7f6f4",
+    zones: ["#5f8a2a", "#4a83a6", "#b07d1a", "#c47238", "#bf5a5a"],
   },
 };
 

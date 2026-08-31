@@ -1,29 +1,20 @@
-import type { Threshold, Today } from "../api";
+import type { Today } from "../api";
 import { czDate } from "../format";
-import { THEMES, type ThemeName } from "../theme";
-import { ThresholdBadge } from "./ThresholdBadge";
 import { mono } from "./ui";
 
-const SUN =
-  "M12 3v1.5M12 19.5V21M4.2 4.2l1.1 1.1M18.7 18.7l1.1 1.1M3 12h1.5M19.5 12H21M4.2 19.8l1.1-1.1M18.7 5.3l1.1-1.1M12 7.5a4.5 4.5 0 100 9 4.5 4.5 0 000-9z";
-const MOON = "M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z";
-
+/**
+ * Hlavička Přehledu podle designu 2.0: datum (eyebrow), pozdrav a stavová
+ * tečka. Přepínač motivu je teď na Profilu, práh LTHR taky – hlavička je
+ * čistě informační.
+ */
 export function Header({
   today,
   readiness,
   statusDot,
-  theme,
-  threshold,
-  onThresholdSaved,
-  onToggleTheme,
 }: {
   today: Today | null;
   readiness: number | null;
   statusDot: string;
-  theme: ThemeName;
-  threshold: Threshold | null;
-  onThresholdSaved: (next: Threshold) => void;
-  onToggleTheme: () => void;
 }) {
   const statusLabel =
     readiness == null
@@ -62,66 +53,25 @@ export function Header({
         </h1>
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
-        <ThresholdBadge
-          threshold={threshold}
-          onSaved={onThresholdSaved}
-          theme={THEMES[theme]}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: "50%",
+            background: statusDot,
+            boxShadow: `0 0 10px ${statusDot}`,
+          }}
         />
-
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: "50%",
-              background: statusDot,
-              boxShadow: `0 0 10px ${statusDot}`,
-            }}
-          />
-          <span
-            style={mono(11, {
-              letterSpacing: ".08em",
-              textTransform: "uppercase",
-              color: "var(--mut)",
-            })}
-          >
-            {statusLabel}
-          </span>
-        </div>
-
-        <button
-          type="button"
-          onClick={onToggleTheme}
-          aria-label="Přepnout motiv"
-          className="hover-fg"
-          style={mono(10.5, {
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            padding: "6px 12px 6px 9px",
-            border: "1px solid var(--line2)",
-            borderRadius: 999,
-            background: "var(--card)",
-            color: "var(--mut)",
+        <span
+          style={mono(11, {
             letterSpacing: ".08em",
             textTransform: "uppercase",
-            cursor: "pointer",
+            color: "var(--mut)",
           })}
         >
-          <svg
-            viewBox="0 0 24 24"
-            width="14"
-            height="14"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-          >
-            <path d={theme === "dark" ? SUN : MOON} />
-          </svg>
-          {theme === "dark" ? "Světlý" : "Tmavý"}
-        </button>
+          {statusLabel}
+        </span>
       </div>
     </header>
   );

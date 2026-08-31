@@ -1,44 +1,39 @@
 /**
- * Dotahování dat pro panely tepové křivky a souvislých bloků.
+ * Dotahování dat pro panely souvislých bloků na Tréninku.
  *
- * Zbytek dashboardu se načte jedním požadavkem a období se přepíná v
- * prohlížeči. Tyhle dva panely ne: jsou to agregace přes období a přes
- * filtr „jen úplná data" nad tabulkami, které mají desítky tisíc řádků.
- * Přepnutí období, tolerance nebo filtru proto znamená nový dotaz.
+ * Zbytek Tréninku se odvozuje na klientu z `payload.activities`. Bloky ne:
+ * jsou to agregace přes období a přes filtr „jen úplná data" nad tabulkou
+ * s desítkami tisíc řádků. Každá zóna (Z4, Z2) má vlastní toleranci
+ * přemostění a vlastní filtr, takže se dotahují nezávisle.
  *
  * Během načítání zůstávají viditelná stará data (jen ztlumená) – prázdný
- * panel na půl vteřiny vypadá jako "žádná data", což je jiné tvrzení.
+ * panel na půl vteřiny vypadá jako „žádná data", což je jiné tvrzení.
  */
 
 import { useEffect, useState } from "react";
 
-import {
-  fetchBlocks,
-  fetchCurve,
-  fetchThreshold,
-  type HrBlocksPayload,
-  type HrCurvePayload,
-  type Threshold,
-} from "./api";
+import { fetchBlocks, fetchThreshold, type HrBlocksPayload, type Threshold } from "./api";
 
-export interface HrPanelsState {
-  curve: HrCurvePayload | null;
-  blocks: HrBlocksPayload | null;
+export interface BlockRequest {
+  zone: string;
+  completeOnly: boolean;
+  tolerance: number;
+}
+
+export interface BlockPanelsState {
+  byZone: Record<string, HrBlocksPayload | null>;
   threshold: Threshold | null;
   loading: boolean;
   error: string | null;
 }
 
-export function useHrPanels(
+export function useBlockPanels(
   since: string | null,
   until: string | null,
-  completeOnly: boolean,
-  compare: "prev" | "year",
-  tolerance: number,
+  requests: BlockRequest[],
   thresholdVersion: number,
-): HrPanelsState & { setThreshold: (next: Threshold) => void } {
-  const [curve, setCurve] = useState<HrCurvePayload | null>(null);
-  const [blocks, setBlocks] = useState<HrBlocksPayload | null>(null);
+): BlockPanelsState {
+  const [byZone, setByZone] = useState<Record<string, HrBlocksPayload | null>>({});
   const [threshold, setThreshold] = useState<Threshold | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -53,18 +48,25 @@ export function useHrPanels(
     return () => ctrl.abort();
   }, []);
 
+  // Serializace requestů do stabilního klíče pro dep array.
+  const key = JSON.stringify(requests);
+
   useEffect(() => {
     if (!since || !until) return;
+    const reqs: BlockRequest[] = JSON.parse(key);
     const ctrl = new AbortController();
     setLoading(true);
 
-    Promise.all([
-      fetchCurve({ since, until, completeOnly, compare }, ctrl.signal),
-      fetchBlocks({ since, until, completeOnly, tolerance }, ctrl.signal),
-    ])
-      .then(([c, b]) => {
-        setCurve(c);
-        setBlocks(b);
+    Promise.all(
+      reqs.map((r) =>
+        fetchBlocks(
+          { since, until, completeOnly: r.completeOnly, tolerance: r.tolerance, zone: r.zone },
+          ctrl.signal,
+        ).then((b) => [r.zone, b] as const),
+      ),
+    )
+      .then((pairs) => {
+        setByZone(Object.fromEntries(pairs));
         setError(null);
       })
       .catch((err: unknown) => {
@@ -74,9 +76,8 @@ export function useHrPanels(
       .finally(() => setLoading(false));
 
     return () => ctrl.abort();
-    // thresholdVersion je tu schválně: po změně LTHR se panel bloků musí
-    // zeptat na jiný práh. Přepočítává se dotaz, ne data.
-  }, [since, until, completeOnly, compare, tolerance, thresholdVersion]);
+    // thresholdVersion schválně: po změně LTHR se panel musí zeptat na jiný práh.
+  }, [since, until, key, thresholdVersion]);
 
-  return { curve, blocks, threshold, loading, error, setThreshold };
+  return { byZone, threshold, loading, error };
 }
