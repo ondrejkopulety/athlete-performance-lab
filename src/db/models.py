@@ -142,17 +142,14 @@ class ActivityMetrics(Base):
     avg_gradient_pct: Mapped[float | None] = mapped_column(Float)
     climb_category: Mapped[str | None] = mapped_column(String(16))
 
-    # S/U/V – R-R fyziologie
-    # aet_hr_dfa/ant_hr_dfa smí obsahovat jen práh spočítaný z R-R intervalů.
-    # Odhad z linearity tep↔rychlost patří výhradně do aet_hr_proxy – dokud
-    # se plnily oba stejnou hodnotou, vypadal proxy odhad jako výsledek DFA.
-    aet_hr_dfa: Mapped[int | None] = mapped_column(Integer)
-    ant_hr_dfa: Mapped[int | None] = mapped_column(Integer)
-    aet_hr_proxy: Mapped[int | None] = mapped_column(Integer)
-    # rr_ok | unreliable | synthetic_rr | no_rr | failed  (viz physio/cli.py)
+    # R-R fyziologie
+    # dfa_quality = posudek pravosti R-R řady (rr_ok | unreliable |
+    # synthetic_rr | no_rr | failed), plní ho krok `rr` v src/physio.
+    # DFA-alpha1 prahy (aet_hr_dfa/ant_hr_dfa) byly odstraněny – v datech
+    # tohoto atleta není jediná aktivita s pravými beat-to-beat R-R.
     dfa_quality: Mapped[str | None] = mapped_column(String(16))
     resp_rate_rsa: Mapped[float | None] = mapped_column(Float)
-    # R-R intervaly (ms) uložené při načtení FIT → DFA/RSA se počítají bez
+    # R-R intervaly (ms) uložené při načtení FIT → RSA se počítá bez
     # opětovného otevírání FIT souboru na disku.
     rr_intervals_ms: Mapped[list[float] | None] = mapped_column(ARRAY(Float))
 
@@ -167,11 +164,6 @@ class ActivityMetrics(Base):
     best_30min_hr: Mapped[float | None] = mapped_column(Float)
     best_60min_hr: Mapped[float | None] = mapped_column(Float)
 
-    # Diagnostika DFA – ať je z dat vidět, kde metoda dává smysl
-    dfa_alpha1_min: Mapped[float | None] = mapped_column(Float)
-    dfa_alpha1_median: Mapped[float | None] = mapped_column(Float)
-    dfa_window_count: Mapped[int | None] = mapped_column(Integer)
-
     # Diagnostika R-R (src/physio) – čím se posuzuje, jestli řada vůbec nese
     # variabilitu mezi tepy, a ne jen jestli ve FIT byly hrv zprávy.
     rr_beat_count: Mapped[int | None] = mapped_column(Integer)
@@ -181,13 +173,10 @@ class ActivityMetrics(Base):
     rr_lattice_coverage: Mapped[float | None] = mapped_column(Float)
     rr_authenticity: Mapped[str | None] = mapped_column(String(16))
 
-    # R/Q/W – EPOC, práh, TATI
+    # R/Q – EPOC, čas nad prahem
     epoc_score: Mapped[float | None] = mapped_column(Float)
     time_at_threshold_min: Mapped[float | None] = mapped_column(Float)
     tte_z4z5_min: Mapped[float | None] = mapped_column(Float)
-    # critical_hr přesunuto do DailyMetrics – je to jedna atletova hodnota
-    # (85. percentil přes celou historii), ne per-activity metrika.
-    tati_score: Mapped[float | None] = mapped_column(Float)
 
     # Percentilové pořadí TRIMP téhle aktivity mezi kardio aktivitami
     # v celé historii (viz src/analytics/activity.py:compute_trimp_load_percentile).
@@ -429,7 +418,6 @@ class DailyMetrics(Base):
 
     # Zátěž (PMC)
     trimp: Mapped[float | None] = mapped_column(Float)
-    trimp_epoc: Mapped[float | None] = mapped_column(Float)
     ctl: Mapped[float | None] = mapped_column(Float)
     atl: Mapped[float | None] = mapped_column(Float)
     tsb: Mapped[float | None] = mapped_column(Float)
@@ -449,11 +437,6 @@ class DailyMetrics(Base):
     polarization_low_pct: Mapped[float | None] = mapped_column(Float)
     polarization_high_pct: Mapped[float | None] = mapped_column(Float)
     z3_junk_pct: Mapped[float | None] = mapped_column(Float)
-
-    # Critical HR – 85. percentil průměrného tepu přes celou historii kardio
-    # aktivit (Monod-Scherrer adaptovaný na tep). Jedna atletova hodnota,
-    # do daily jde konstantou. Přesunuto sem z activity_metrics.
-    critical_hr: Mapped[float | None] = mapped_column(Float)
 
     # Regenerace a biometrie (denormalizované pro rychlé čtení dashboardem)
     readiness_score: Mapped[float | None] = mapped_column(Float)

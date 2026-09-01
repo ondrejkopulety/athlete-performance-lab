@@ -65,7 +65,7 @@ TODAY_SECTIONS: dict[str, list[str]] = {
     "quality": [
         "monotony", "strain", "whoop_strain",
         "polarization_low_pct", "polarization_high_pct", "z3_junk_pct",
-        "fatigue_index", "critical_hr",
+        "fatigue_index",
     ],
     "metabolism": [
         "epoc_score_daily",
@@ -87,8 +87,7 @@ ACTIVITY_FIELDS = [
     "total_trimp", "distance_km", "ascent_m", "avg_hr", "max_hr",
     "time_in_z1", "time_in_z2", "time_in_z3", "time_in_z4", "time_in_z5",
     "cardiac_drift", "max_hrr_60s", "durability_pct", "vam_m_per_h",
-    "aet_hr_dfa", "ant_hr_dfa", "epoc_score",
-    "avg_gradient_pct", "climb_category",
+    "epoc_score", "avg_gradient_pct", "climb_category",
 ]  # resp_rate_rsa vynecháno – experimentální, viz METRIC_META
 
 

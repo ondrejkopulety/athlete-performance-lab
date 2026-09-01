@@ -689,9 +689,11 @@ def parse_fit_file(
 
     # Summary výpočty
     avg_hr_val  = round(mean(hr_values)) if hr_values else None
-    # Clamp max HR to MAX_HR – device glitches occasionally report
-    # physiologically impossible values (220+ bpm).
-    max_hr_val  = min(max(hr_values), MAX_HR) if hr_values else None
+    # Jeden absolutní strop pro celou pipeline: hr_values už prošly
+    # _plausible_hr (<= HR_PLAUSIBLE_MAX_BPM = 205), takže tady se jen
+    # zrcadlí táž mez místo dřívějšího tvrdšího clampu na MAX_HR (199) –
+    # naměřené maximum smí max_hr ukázat, glitche nad 205 jsou už pryč.
+    max_hr_val  = min(max(hr_values), HR_PLAUSIBLE_MAX_BPM) if hr_values else None
 
     # Duration from active records only (prevents "bag activity" inflation where e.g.
     # a forgotten soccer watch accumulates 5 h but only 6 TRIMP).

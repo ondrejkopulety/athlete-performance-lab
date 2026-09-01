@@ -37,10 +37,6 @@ from config.settings import (
 HIKING_TRIMP_COEFFICIENT = 0.6
 HIKING_SPORT_PATTERN = "hiking|walking"
 
-# EPOC-vážený TRIMP: 10 % EPOC skóre navrch, aby ACWR vnímalo i intenzitu,
-# nejen objem.
-EPOC_WEIGHT = 0.1
-
 
 def ema_decay(series: pd.Series, span: int) -> pd.Series:
     """
@@ -60,8 +56,7 @@ def build_daily_load(
     """
     Denní agregace tréninkové zátěže na zadanou osu.
 
-    Vrací DataFrame indexovaný datem se sloupci trimp, trimp_epoc,
-    epoc_score_daily.
+    Vrací DataFrame indexovaný datem se sloupci trimp, epoc_score_daily.
 
     Dny bez tréninku mají trimp = 0 (to je fyziologicky správně – netrénoval
     jsem, zátěž je nula). Biometrické sloupce se tu záměrně needitují,
@@ -70,7 +65,7 @@ def build_daily_load(
     empty = pd.DataFrame(
         0.0,
         index=calendar,
-        columns=["trimp", "trimp_epoc", "epoc_score_daily"],
+        columns=["trimp", "epoc_score_daily"],
     )
     empty.index.name = "date"
     if activities is None or activities.empty:
@@ -100,8 +95,7 @@ def build_daily_load(
     )
     daily = daily.reindex(calendar, fill_value=0.0)
     daily.index.name = "date"
-    daily["trimp_epoc"] = daily["trimp"] + daily["epoc_score_daily"] * EPOC_WEIGHT
-    return daily[["trimp", "trimp_epoc", "epoc_score_daily"]]
+    return daily[["trimp", "epoc_score_daily"]]
 
 
 def compute_ctl_atl_tsb(daily: pd.DataFrame) -> pd.DataFrame:
@@ -121,29 +115,47 @@ def compute_ctl_atl_tsb(daily: pd.DataFrame) -> pd.DataFrame:
 
 def compute_acwr(daily: pd.DataFrame) -> pd.DataFrame:
     """
-    ACWR = 7denní průměr / 28denní průměr z EPOC-vážené TRIMP.
+    ACWR (uncoupled) = průměr TRIMP za posledních 7 dní / průměr za dny 8–28.
+
+    Uncoupled záměrně: v coupled variantě (7denní průměr / 28denní průměr,
+    kde akutní okno je podmnožinou chronického) sdílí čitatel a jmenovatel
+    stejná data, což uměle zvyšuje jejich autokorelaci a tlačí poměr k 1
+    (Gabbett 2019+). Tady je chronické okno 21 dní PŘED akutním oknem,
+    takže se nepřekrývají.
+
+    Z čisté denní TRIMP, ne z EPOC-vážené: literární prahy (0.8–1.3 sweet
+    spot, > 1.5 danger) jsou odvozené z čistého load. Přimíchaný EPOC by
+    dvakrát započítal intenzitu (TRIMP ji už váží exponenciálně) a prahy
+    by přestaly platit.
 
     Bez clipování – hodnoty > 2.0 jsou legitimní signál přetrénování
     a konzument (dashboard, chatbot) si je má vyhodnotit sám.
 
-    ALE: když v 28denním okně proběhlo méně než ACWR_MIN_ACTIVE_DAYS
-    tréninkových dní, poměr se mechanicky sesype na
-    ACWR_CHRONIC_DAYS/ACWR_ACUTE_DAYS (jedna jednotka v obou oknech dá
-    (X/7)/(X/28) = 4.0 bez ohledu na X). Takové dny dostanou NaN, protože
-    o riziku nevypovídají – jen o řídkém tréninku.
+    Když v chronickém okně proběhlo méně než ACWR_MIN_ACTIVE_DAYS
+    tréninkových dní, dostane den NaN – poměr z pár jednotek je nestabilní
+    a o riziku nevypovídá, jen o řídkém tréninku.
 
     Navíc CTL ramp rate = týdenní přírůstek CTL.
     """
     daily = daily.copy()
-    trimp_col = daily["trimp_epoc"] if "trimp_epoc" in daily.columns else daily["trimp"]
+    trimp_col = daily["trimp"]
+
+    chronic_window = ACWR_CHRONIC_DAYS - ACWR_ACUTE_DAYS   # dny 8–28 → 21 dní
 
     acute = trimp_col.rolling(ACWR_ACUTE_DAYS, min_periods=ACWR_ACUTE_DAYS).mean()
-    chronic = trimp_col.rolling(ACWR_CHRONIC_DAYS, min_periods=ACWR_CHRONIC_DAYS).mean()
+    # Chronické okno je posunuté o akutní okno dozadu: shift(7) a pak průměr
+    # z 21 dní pokrývá přesně dny 8–28 před aktuálním dnem.
+    chronic = (
+        trimp_col.shift(ACWR_ACUTE_DAYS)
+        .rolling(chronic_window, min_periods=chronic_window)
+        .mean()
+    )
     acwr = (acute / chronic.replace(0, np.nan)).round(2)
 
     active_days = (
         (trimp_col > 0)
-        .rolling(ACWR_CHRONIC_DAYS, min_periods=ACWR_CHRONIC_DAYS)
+        .shift(ACWR_ACUTE_DAYS)
+        .rolling(chronic_window, min_periods=chronic_window)
         .sum()
     )
     acwr = acwr.where(active_days >= ACWR_MIN_ACTIVE_DAYS)

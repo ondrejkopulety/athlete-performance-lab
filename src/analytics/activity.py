@@ -6,18 +6,20 @@ Metriky počítané pro jednu aktivitu. Dělí se na dvě skupiny:
 
   • **Vektorové** (compute_activity_table) – pracují jen se souhrnnými
     sloupci, spočítají se pro všechny aktivity najednou: fueling, VAM,
-    climb score, EPOC, TTE, ztráta tekutin, Critical HR / TATI.
+    climb score, EPOC, TTE, ztráta tekutin, percentil zátěže.
 
   • **Nad vteřinovými daty** (compute_activity_series_metrics) – cardiac
-    drift, max HRR za 60 s, durabilita, DFA-alpha1 a dechová frekvence
+    drift, max HRR za 60 s, durabilita a experimentální dechová frekvence
     z RSA. Tohle je drahá část: právě kvůli ní byla původní analytika
     minutová záležitost, protože přepočítávala všech 864 aktivit při
     každém běhu.
 
 R-R intervaly se berou z databáze (activity_metrics.rr_intervals_ms),
-uložené při načtení FIT souboru – DFA ani RSA už nesahají na disk.
+uložené při načtení FIT souboru – RSA už nesahá na disk. Posudek pravosti
+R-R (dfa_quality a rr_* diagnostika) plní samostatně src/physio.
 
-Vzorce jsou převzaté beze změny z athlete_analytics.py.
+Vzorce jsou převzaté z athlete_analytics.py; odchylky nese komentář u
+konkrétní funkce.
 """
 
 from __future__ import annotations
@@ -30,9 +32,6 @@ import numpy as np
 import pandas as pd
 
 from config.settings import (
-    DFA_AET_THRESHOLD,
-    DFA_ANT_THRESHOLD,
-    DFA_WINDOW_BEATS,
     DURABILITY_MIN_DURATION_MIN,
     FAT_PCT_BY_ZONE,
     HR_GRID_FFILL_LIMIT_S,
@@ -43,15 +42,14 @@ from config.settings import (
     MAX_3S_JUMP,
     MAX_REALISTIC_HRR,
     MIN_STARTING_HR,
+    RR_MAX_SECONDS,
+    RR_MIN_SECONDS,
     TRIMP_K1,
     TRIMP_K2,
     WARMUP_SECONDS,
 )
 from config.settings import (
     MAX_HR as ATHLETE_MAX_HR,
-)
-from config.settings import (
-    ZONES as ATHLETE_ZONES,
 )
 from src.ingestion.sport import (
     EBIKE_SPORT_PATTERN,
@@ -61,21 +59,19 @@ from src.ingestion.sport import (
 )
 from src.physio.hr_curve import max_mean_curve
 from src.physio.hr_stream import to_second_grid
-from src.physio.quality import assess_rr_authenticity
+from src.physio.rr_clean import clean_rr
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 log = logging.getLogger("analytics.activity")
 
-# ── Volitelné závislosti pro pokročilou fyziologii ─────────────────────────
+# ── Volitelné závislosti pro dechovou frekvenci z RSA (respiration_from_rr) ─
 try:
-    import neurokit2 as nk
     from scipy.interpolate import interp1d
-    from scipy.ndimage import uniform_filter1d
     from scipy.signal import welch
 
-    HAS_NEUROKIT = True
+    HAS_SCIPY = True
 except ImportError:  # pragma: no cover - závisí na prostředí
-    HAS_NEUROKIT = False
+    HAS_SCIPY = False
 
 MIN_DURATION_DRIFT_MIN = 20
 
@@ -91,9 +87,7 @@ CARDIAC_DRIFT_MAX_ALT_RANGE_M = 30.0
 KCAL_PER_G_FAT = 9.0
 KCAL_PER_G_CARB = 4.0
 
-DFA_SLIDE_BEATS = 30
-DFA_BOX_SIZES = list(range(4, 17))
-
+# Minimální počet aktivit pro percentilové metriky (trimp_load_percentile).
 CHR_MIN_ACTIVITIES = 5
 
 # Sporty, kde má VAM smysl. Gravitační sporty (sjezdovka, snowboard) jsou
@@ -119,34 +113,119 @@ def safe_div(a, b, default=np.nan):
 # R-R INTERVALY
 # ═══════════════════════════════════════════════════════════════════════════
 
-def clean_rr_intervals(rr_ms: list[float] | np.ndarray, max_pct_change: float = 0.20) -> np.ndarray:
+def clean_rr_intervals(rr_ms: list[float] | np.ndarray) -> np.ndarray:
     """
-    Vyčistí R-R intervaly (v ms) od fyziologicky nemožných hodnot.
+    Vyčistí R-R intervaly (v ms) od nemožných hodnot a artefaktů.
 
-    1) ponechá jen 273–2000 ms (tep 30–220), 2) vyhodí ektopické stahy
-    s >20% skokem oproti předchozímu.
+    Používá to už jen ``respiration_from_rr``; dřív i DFA-alpha1 prahy, které
+    byly odstraněny. Filtr je jednotný se zbytkem projektu (dřív tu byl
+    vlastní dopředný ratio-filtr s mezemi 273–2000 ms, směrově závislý a
+    umějící řetězově zahazovat po jednom reálném velkém skoku):
+
+      1) fyziologické meze z ``RR_MIN_SECONDS`` / ``RR_MAX_SECONDS``,
+      2) odchylka od klouzavého MEDIÁNU okolních tepů
+         (``src.physio.rr_clean.clean_rr``) – symetrické okno, jeden
+         vynechaný/zdvojený tep nevychýlí referenci.
+
+    Vrací ponechané intervaly v ms (kvůli zpětné kompatibilitě volajících).
     """
     arr = np.asarray(rr_ms, dtype=float)
-    arr = arr[(arr >= 273) & (arr <= 2000)]
+    arr = arr[(arr >= RR_MIN_SECONDS * 1000.0) & (arr <= RR_MAX_SECONDS * 1000.0)]
     if len(arr) < 10:
         return arr
-
-    keep = [0]
-    for i in range(1, len(arr)):
-        if abs(arr[i] - arr[i - 1]) / arr[i - 1] <= max_pct_change:
-            keep.append(i)
-    return arr[keep]
+    cleaned = clean_rr(arr / 1000.0)
+    return cleaned.rr_seconds * 1000.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MODUL A – CARDIAC DRIFT (aerobní decoupling Pa:HR)
 # ═══════════════════════════════════════════════════════════════════════════
 
+# Okno pro Normalized Power (Coggan) – 30 s klouzavý průměr, pak 4. mocnina.
+NP_ROLL_S = 30
+# Interpolace přes krátké díry při převzorkování na 1 Hz.
+DRIFT_INTERPOLATE_LIMIT_S = 30
+# Minimum naměřených sekund na jednu půlku, aby měl průměr smysl.
+DRIFT_MIN_HALF_SECONDS = 60
+
+
+def _to_1hz(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """
+    Vybrané sloupce na spojitou 1Hz časovou mřížku.
+
+    Smart Recording vzorkuje nerovnoměrně (1–12 s) a kolem autopauz je
+    hustota jiná; nevážený průměr přes řádky pak dává větší váhu hustěji
+    vzorkovaným úsekům. Převzorkování na 1 Hz je z průměru přes řádky dělá
+    průměr přes čas. Díry do 30 s se dolijí interpolací, delší zůstanou NaN
+    a do průměru nevstoupí.
+    """
+    d = df[["timestamp", *cols]].dropna(subset=["timestamp"]).copy()
+    d["timestamp"] = pd.to_datetime(d["timestamp"])
+    d = d.set_index("timestamp").sort_index()
+    d = d[~d.index.duplicated(keep="first")]
+    num = d.apply(pd.to_numeric, errors="coerce")
+    return num.resample("1s").mean().interpolate(
+        method="time", limit=DRIFT_INTERPOLATE_LIMIT_S
+    )
+
+
+def _normalized_power(power_1hz: pd.Series) -> float:
+    """
+    Normalized Power nad 1Hz řadou: ((30s klouzavý průměr)^4).mean()^0.25.
+
+    Průměrný výkon zkresluje decoupling, protože proměnlivé úsilí (kopce,
+    města, intervaly) mění obě půlky různě. NP je standard pro Pa:HR
+    (Coggan).
+    """
+    roll = power_1hz.rolling(NP_ROLL_S, min_periods=NP_ROLL_S).mean().dropna()
+    if roll.empty:
+        return float("nan")
+    return float(roll.pow(4).mean() ** 0.25)
+
+
+def _half_means(
+    grid: pd.DataFrame, effort_col: str
+) -> Optional[tuple[float, float, float, float]]:
+    """
+    Časově vážené průměry HR a úsilí pro obě poloviny 1Hz mřížky.
+
+    Vrací ``(hr1, hr2, eff1, eff2)`` nebo ``None``, když je některá půlka
+    kratší než ``DRIFT_MIN_HALF_SECONDS`` naměřených sekund. Úsilí je NP
+    u ``power``, časový průměr u ``speed``.
+    """
+    if grid.empty:
+        return None
+    span = grid.index[-1] - grid.index[0]
+    mid = grid.index[0] + span / 2
+    g1 = grid[grid.index <= mid]
+    g2 = grid[grid.index > mid]
+    if g1["heart_rate"].count() < DRIFT_MIN_HALF_SECONDS:
+        return None
+    if g2["heart_rate"].count() < DRIFT_MIN_HALF_SECONDS:
+        return None
+
+    hr1, hr2 = float(g1["heart_rate"].mean()), float(g2["heart_rate"].mean())
+    if effort_col == "power":
+        eff1, eff2 = _normalized_power(g1["power"]), _normalized_power(g2["power"])
+    else:
+        eff1, eff2 = float(g1[effort_col].mean()), float(g2[effort_col].mean())
+
+    if any(v is None or np.isnan(v) for v in (hr1, hr2, eff1, eff2)):
+        return None
+    return hr1, hr2, eff1, eff2
+
+
 def cardiac_drift(tdata: pd.DataFrame, sport: str) -> Optional[float]:
     """
     Přeskočí 10min rozjezd, zbytek rozdělí časovým středem na dvě poloviny.
 
-    Kolo s wattmetrem: EF = power/HR (rychlost je na kole funkcí terénu).
+    Průměry obou půlek jsou **časově vážené** (na 1Hz mřížce), ne prostý
+    průměr přes záznamy – Smart Recording vzorkuje nerovnoměrně a hustěji
+    vzorkované úseky by jinak průměr táhly k sobě.
+
+    Kolo s wattmetrem: EF = NP/HR (rychlost je na kole funkcí terénu; NP
+          místo průměrného výkonu, protože proměnlivé úsilí zkresluje obě
+          půlky různě – Cogganův standard pro Pa:HR).
     Kolo bez wattmetru i běh: EF = speed/HR, ale jen na rovině – do kopce
           je vztah rychlost↔tep rozbitý gravitací. U běhu navíc jen v Z1/Z2,
           protože intervaly ten vztah rozbíjejí laktátem.
@@ -200,18 +279,12 @@ def cardiac_drift(tdata: pd.DataFrame, sport: str) -> Optional[float]:
         if len(post) < 20:
             return None
 
-    # Dělení podle času, ne podle počtu řádků – Smart Recording zapisuje
-    # nerovnoměrně a dělení po řádcích by poloviny posunulo.
-    t_start = post["timestamp"].iloc[0]
-    t_end = post["timestamp"].iloc[-1]
-    t_mid = t_start + (t_end - t_start) / 2
-    first_half = post[post["timestamp"] <= t_mid]
-    second_half = post[post["timestamp"] > t_mid]
-    if first_half.empty or second_half.empty:
+    # Dělení podle času nad 1Hz mřížkou – průměr přes čas, ne přes řádky.
+    grid = _to_1hz(post, ["heart_rate", effort_col])
+    halves = _half_means(grid, effort_col)
+    if halves is None:
         return None
-
-    hr1, hr2 = first_half["heart_rate"].mean(), second_half["heart_rate"].mean()
-    eff1, eff2 = first_half[effort_col].mean(), second_half[effort_col].mean()
+    hr1, hr2, eff1, eff2 = halves
     if hr1 == 0 or hr2 == 0:
         return None
 
@@ -305,6 +378,9 @@ def durability(tdata: pd.DataFrame, sport: str) -> Optional[float]:
     Durability = (EF_2 / EF_1 − 1) × 100. Záporné číslo znamená pokles
     výkonu při stejném tepu, tedy únavu.
 
+    Půlky se průměrují časově vážené (1Hz mřížka); EF = NP/HR pro power
+    větev, speed/HR jinak – stejná logika jako u ``cardiac_drift``.
+
     Kolo bez wattmetru spadne na speed/HR – ale jen na rovině, jinak by
     profil trasy převážil únavu. Bez fallbacku měla durabilitu jen hrstka
     jízd s power daty (3 z 884).
@@ -343,14 +419,11 @@ def durability(tdata: pd.DataFrame, sport: str) -> Optional[float]:
         if len(alt_vals) >= 10 and float(alt_vals.max() - alt_vals.min()) > CARDIAC_DRIFT_MAX_ALT_RANGE_M:
             return None
 
-    t_mid = t0 + (t_end - t0) / 2
-    h1 = active[active["timestamp"] <= t_mid]
-    h2 = active[active["timestamp"] > t_mid]
-    if h1.empty or h2.empty:
+    grid = _to_1hz(active, ["heart_rate", effort_col])
+    halves = _half_means(grid, effort_col)
+    if halves is None:
         return None
-
-    hr1, hr2 = h1["heart_rate"].mean(), h2["heart_rate"].mean()
-    eff1, eff2 = h1[effort_col].mean(), h2[effort_col].mean()
+    hr1, hr2, eff1, eff2 = halves
     if hr1 == 0 or hr2 == 0:
         return None
     if effort_col == "power":
@@ -364,195 +437,6 @@ def durability(tdata: pd.DataFrame, sport: str) -> Optional[float]:
     if ef1 == 0:
         return None
     return round((ef2 / ef1 - 1) * 100.0, 2)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# MODUL S – DFA-alpha1 PROXY (aerobní práh z linearity HR vs rychlost)
-# ═══════════════════════════════════════════════════════════════════════════
-
-def dfa_alpha1_proxy(tdata: pd.DataFrame) -> Optional[int]:
-    """
-    Náhradní odhad aerobního prahu, když nejsou k dispozici R-R intervaly.
-
-    Hledá bod, kde se láme linearita nárůstu tepu vůči rychlosti.
-    """
-    if tdata.empty:
-        return None
-
-    # Přímá detekce z HRV sloupce (pokles variability)
-    if "hrv" in tdata.columns and tdata["hrv"].notna().sum() > 60:
-        df = tdata[["heart_rate", "hrv"]].dropna().copy()
-        if len(df) > 100:
-            df = df.sort_values("heart_rate")
-            df["hr_bin"] = (df["heart_rate"] // 5) * 5
-            binned = df.groupby("hr_bin").agg(hrv_mean=("hrv", "mean"), count=("hrv", "count"))
-            binned = binned[binned["count"] >= 3]
-            if len(binned) >= 4:
-                threshold = binned["hrv_mean"].max() * 0.5
-                below = binned[binned["hrv_mean"] < threshold]
-                if not below.empty:
-                    aet_hr = int(below.index[0])
-                    if aet_hr > (ATHLETE_MAX_HR * 0.80):
-                        return None
-                    if 130 <= aet_hr <= (ATHLETE_MAX_HR * 0.85):
-                        return aet_hr
-
-    if "speed" not in tdata.columns:
-        return None
-
-    active = tdata.loc[
-        (tdata["is_active"] == True)  # noqa: E712
-        & tdata["heart_rate"].notna()
-        & (tdata["heart_rate"] > 0)
-        & tdata["speed"].notna()
-        & (tdata["speed"] > 0.5)
-    ].copy()
-    if len(active) < 100:
-        return None
-
-    # Filtr sklonu ±2 %: do kopce i z kopce je vztah tep↔rychlost rozbitý
-    # gravitací nezávisle na aerobním výkonu.
-    if "altitude" in active.columns and "distance" in active.columns:
-        delta_alt = pd.to_numeric(active["altitude"], errors="coerce").diff()
-        delta_dist = pd.to_numeric(active["distance"], errors="coerce").diff()
-        gradient_pct = (delta_alt / delta_dist.replace(0, np.nan)) * 100.0
-        active = active[(gradient_pct.abs() <= 2.0).fillna(True)]
-        if len(active) < 100:
-            return None
-
-    active = active.sort_values("speed")
-    n = len(active)
-    n_segments = min(10, n // 20)
-    if n_segments < 4:
-        return None
-
-    seg_size = n // n_segments
-    slopes, hr_mids = [], []
-    for i in range(n_segments - 1):
-        s1 = active.iloc[i * seg_size : (i + 1) * seg_size]
-        s2 = active.iloc[(i + 1) * seg_size : (i + 2) * seg_size]
-        dhr = s2["heart_rate"].mean() - s1["heart_rate"].mean()
-        dsp = s2["speed"].mean() - s1["speed"].mean()
-        # abs(), aby mírný pokles rychlosti mezi segmenty nedal záporný sklon
-        if abs(dsp) > 0.05:
-            slopes.append(dhr / dsp)
-            hr_mids.append(s2["heart_rate"].mean())
-
-    if len(slopes) < 3:
-        return None
-
-    slope_diffs = [slopes[i + 1] - slopes[i] for i in range(len(slopes) - 1)]
-    aet_hr = int(hr_mids[int(np.argmax(slope_diffs))])
-
-    # Fyziologický strop: AeT/VT1 nemůže být nad 80 % MaxHR; šum z optického
-    # snímače umí vyrobit falešný zlom až u prahových hodnot.
-    if aet_hr > (ATHLETE_MAX_HR * 0.80):
-        return None
-    if aet_hr < 130 or aet_hr > (ATHLETE_MAX_HR * 0.85):
-        return None
-    return aet_hr
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# MODUL U – DFA-alpha1 z R-R intervalů (neurokit2)
-# ═══════════════════════════════════════════════════════════════════════════
-
-def dfa_alpha1_thresholds(rr_ms: list[float] | None, tdata: pd.DataFrame) -> dict:
-    """
-    Aerobní (α1 = 0.75) a anaerobní (α1 = 0.50) práh z R-R intervalů.
-
-    Když R-R data chybí nebo jsou příliš zašuměná, spadne to na proxy
-    z linearity HR vs rychlost (modul S).
-    """
-    result = {
-        "aet_hr_dfa": None, "ant_hr_dfa": None, "dfa_quality": "no_rr",
-        "dfa_alpha1_min": None, "dfa_alpha1_median": None, "dfa_window_count": None,
-    }
-
-    if not rr_ms or len(rr_ms) < DFA_WINDOW_BEATS:
-        return result
-
-    # Přítomnost R-R ještě neznamená, že nesou variabilitu mezi tepy. Bez téhle
-    # kontroly se počítalo α1 ≈ 1,56 z kvantizované tepové křivky a výsledek
-    # vypadal jako platná diagnostika metody, ne jako vlastnost vstupu.
-    authenticity = assess_rr_authenticity(np.asarray(rr_ms, dtype=float) / 1000.0)
-    if not authenticity.usable:
-        result["dfa_quality"] = (
-            "synthetic_rr" if authenticity.verdict == "synthetic" else "no_rr"
-        )
-        return result
-
-    if not HAS_NEUROKIT:
-        result["dfa_quality"] = "failed"
-        log.debug("neurokit2 není k dispozici – DFA se nepočítá.")
-        return result
-
-    rr_clean = clean_rr_intervals(rr_ms)
-    if len(rr_clean) < DFA_WINDOW_BEATS:
-        result["dfa_quality"] = "unreliable"
-        return result
-
-    hr_alpha_pairs: list[tuple[float, float]] = []
-    for start in range(0, len(rr_clean) - DFA_WINDOW_BEATS + 1, DFA_SLIDE_BEATS):
-        window = rr_clean[start : start + DFA_WINDOW_BEATS]
-        if np.std(window) / np.mean(window) > 0.25:  # okno plné artefaktů
-            continue
-        avg_hr = 60000.0 / np.mean(window)
-        try:
-            # neurokit2 >= 0.2 vrací (alpha: float, info: dict) pro
-            # multifractal=False; starší (alpha, _). Ověřeno na 0.2.13.
-            # `.item()` sundá případný 0-d ndarray, ať `np.isfinite` nespadne.
-            dfa_out = nk.fractal_dfa(window, scale=DFA_BOX_SIZES)
-            alpha1 = float(np.asarray(dfa_out[0]).reshape(-1)[0])
-            if np.isfinite(alpha1) and 0.0 < alpha1 < 2.0:
-                hr_alpha_pairs.append((avg_hr, alpha1))
-        except Exception as exc:  # noqa: BLE001 – jedno vadné okno běh neshodí
-            log.debug("DFA okno přeskočeno: %s", exc)
-            continue
-
-    if len(hr_alpha_pairs) < 10:
-        result["dfa_quality"] = "unreliable"
-        return result
-
-    pairs = sorted(hr_alpha_pairs, key=lambda x: x[0])
-    hrs = np.array([p[0] for p in pairs])
-    alphas = np.array([p[1] for p in pairs])
-
-    # Diagnostika: ukládá se, aby bylo z dat vidět, kde metoda funguje a kde
-    # ne – místo hádání. Nad kvantizovanou tepovou křivkou tady vycházelo
-    # α1 ≈ 1,56; tomu teď předchází kontrola pravosti R-R výš.
-    result["dfa_alpha1_min"] = round(float(alphas.min()), 3)
-    result["dfa_alpha1_median"] = round(float(np.median(alphas)), 3)
-    result["dfa_window_count"] = len(pairs)
-    kernel = min(5, max(3, len(alphas) // 3))
-    alphas_smooth = uniform_filter1d(alphas, size=kernel) if kernel >= 3 else alphas
-
-    def _crossing(threshold: float) -> Optional[float]:
-        for i in range(len(alphas_smooth) - 1):
-            if alphas_smooth[i] >= threshold > alphas_smooth[i + 1]:
-                denom = alphas_smooth[i + 1] - alphas_smooth[i]
-                if denom == 0:
-                    return None
-                frac = (threshold - alphas_smooth[i]) / denom
-                return hrs[i] + frac * (hrs[i + 1] - hrs[i])
-        return None
-
-    aet_hr = _crossing(DFA_AET_THRESHOLD)
-    ant_hr = _crossing(DFA_ANT_THRESHOLD)
-
-    if aet_hr is not None and aet_hr > (ATHLETE_MAX_HR * 0.80):
-        aet_hr = None
-    if aet_hr is not None and (aet_hr < 100 or aet_hr > ATHLETE_MAX_HR):
-        aet_hr = None
-    if ant_hr is not None and (ant_hr < 100 or ant_hr > ATHLETE_MAX_HR):
-        ant_hr = None
-    if aet_hr is not None and ant_hr is not None and ant_hr <= aet_hr:
-        ant_hr = None  # anaerobní práh musí ležet nad aerobním
-
-    result["aet_hr_dfa"] = int(aet_hr) if aet_hr else None
-    result["ant_hr_dfa"] = int(ant_hr) if ant_hr else None
-    result["dfa_quality"] = "rr_ok"
-    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -573,7 +457,7 @@ def respiration_from_rr(rr_ms: list[float] | None) -> Optional[float]:
     nemá se z ní usuzovat. Kandidát na přepracování (jiné pásmo / metoda)
     nebo úplné odstranění.
     """
-    if not HAS_NEUROKIT or not rr_ms or len(rr_ms) < 120:
+    if not HAS_SCIPY or not rr_ms or len(rr_ms) < 120:
         return None
 
     rr_clean = clean_rr_intervals(rr_ms)
@@ -741,66 +625,6 @@ def compute_tte(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def compute_critical_hr(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Critical Heart Rate a TATI (Monod-Scherrer adaptovaný na tep).
-
-    CHR = 85. percentil průměrného tepu z aktivit nad 30 min, stropovaný
-    na 85 % MaxHR. Percentil místo maxima záměrně: jeden všestartový
-    závod by jinak CHR natrvalo nafoukl.
-
-    TATI = akumulovaná práce nad CHR [bpm·min]. Nahrazuje dřívější
-    „W'", protože W' je pojem z výkonové domény a počítat ho z tepu
-    je metodicky špatně.
-    """
-    df = df.copy()
-    df["critical_hr"] = np.nan
-    df["tati_score"] = np.nan
-
-    if "sport" not in df.columns or df.empty:
-        return df
-
-    # Elektrokolo ven z populace pro práh – dlouhá jízda s asistencí drží nízký
-    # průměrný tep a stáhla by 85. percentil. tati_score se elektru níž počítá
-    # dál (čas v Z4/Z5 je skutečná tepová zátěž).
-    is_cardio = cardio_mask(df["sport"])
-    avg_hr = pd.to_numeric(df.get("avg_hr"), errors="coerce")
-    dur_min = pd.to_numeric(df.get("duration_minutes"), errors="coerce")
-
-    eligible = df.loc[is_cardio & avg_hr.notna() & (dur_min >= 20)]
-    if len(eligible) < CHR_MIN_ACTIVITIES:
-        return df
-
-    elig_hr = pd.to_numeric(eligible["avg_hr"], errors="coerce")
-    elig_dur = pd.to_numeric(eligible["duration_minutes"], errors="coerce")
-    long_mask = elig_dur >= 30
-
-    if long_mask.any() and elig_hr[long_mask].notna().any():
-        chr_hr = min(float(elig_hr[long_mask].quantile(0.85)), 0.85 * ATHLETE_MAX_HR)
-    else:
-        chr_hr = 0.85 * ATHLETE_MAX_HR
-    chr_hr = round(float(chr_hr))
-
-    # Střed zóny se bere z nakonfigurovaných ZONES, ne z procent tepové
-    # rezervy. Minuty v time_in_z4/z5 pocházejí z laktátových zón, takže
-    # vážit je odhadem tepu odvozeným jinou definicí by míchalo dvě různé
-    # škály – a hlavně by se to tiše rozešlo, kdyby se zóny po dalším
-    # laktátovém testu upravily.
-    z4_lo, z4_hi = ATHLETE_ZONES["Z4"]
-    z5_lo, z5_hi = ATHLETE_ZONES["Z5"]
-    avg_z4_hr = (z4_lo + z4_hi) / 2.0
-    avg_z5_hr = (z5_lo + z5_hi) / 2.0
-
-    z4_min = pd.to_numeric(df.get("time_in_z4"), errors="coerce").fillna(0)
-    z5_min = pd.to_numeric(df.get("time_in_z5"), errors="coerce").fillna(0)
-
-    df["critical_hr"] = chr_hr
-    df["tati_score"] = (
-        z4_min * max(0, avg_z4_hr - chr_hr) + z5_min * max(0, avg_z5_hr - chr_hr)
-    ).round(1)
-    return df
-
-
 def compute_trimp_load_percentile(df: pd.DataFrame) -> pd.DataFrame:
     """
     Percentilové pořadí zátěže (TRIMP) této aktivity mezi kardio aktivitami
@@ -811,11 +635,10 @@ def compute_trimp_load_percentile(df: pd.DataFrame) -> pd.DataFrame:
     Přednost má ``trimp_adjusted`` (RHR platný k datu aktivity), fallback
     ``total_trimp`` z parseru pro aktivity, které se ještě nepřepočítaly.
 
-    Stejná populace jako u ``compute_critical_hr`` (běh + kolo), ne jen
-    kolo – i běžecká zátěž patří do srovnání "jak těžký byl tenhle trénink
-    vůči zbytku", a rozdělovat podle sportu by při pár desítkách běhů dalo
-    šumový percentil. Elektrokolo se tu NEvylučuje: jeho TRIMP je skutečná
-    zátěž a do srovnání "jak těžký byl trénink" patří.
+    Populace je běh + kolo (ne jen kolo) – i běžecká zátěž patří do srovnání
+    "jak těžký byl tenhle trénink vůči zbytku", a rozdělovat podle sportu by
+    při pár desítkách běhů dalo šumový percentil. Elektrokolo se tu
+    NEvylučuje: jeho TRIMP je skutečná zátěž a do srovnání patří.
     """
     df = df.copy()
     df["trimp_load_percentile"] = np.nan
@@ -840,8 +663,8 @@ def compute_activity_table(activities: pd.DataFrame) -> pd.DataFrame:
     """
     Všechny vektorové per-activity metriky najednou.
 
-    Pozor: compute_critical_hr potřebuje vidět celou historii (počítá
-    percentil napříč aktivitami), takže se sem musí předat kompletní
+    Pozor: compute_trimp_load_percentile potřebuje vidět celou historii
+    (počítá percentil napříč aktivitami), takže se sem musí předat kompletní
     tabulka, ne jen nově načtené aktivity.
     """
     if activities is None or activities.empty:
@@ -855,7 +678,6 @@ def compute_activity_table(activities: pd.DataFrame) -> pd.DataFrame:
     df = compute_vam(df)
     df = compute_epoc(df)
     df = compute_tte(df)
-    df = compute_critical_hr(df)
     df = compute_trimp_load_percentile(df)
     return df
 
@@ -979,27 +801,20 @@ def compute_activity_series_metrics(
     rr_ms: list[float] | None,
 ) -> dict:
     """
-    Metriky vyžadující vteřinová data a R-R intervaly jedné aktivity.
+    Metriky vyžadující vteřinová data (a R-R intervaly pro RSA) jedné aktivity.
 
     Tohle je jediná drahá část analytiky – proto se počítá jen pro
     aktivity se zastaralou metrics_version.
+
+    ``rr_ms`` slouží už jen pro ``respiration_from_rr``. Posudek pravosti
+    R-R (``dfa_quality`` a spol.) plní samostatně ``src/physio`` přes krok
+    ``rr`` v pipeline.
     """
     sport_lower = str(sport or "").lower()
-    dfa = dfa_alpha1_thresholds(rr_ms, tdata)
     return {
         **compute_best_hr_windows(tdata),
-        "dfa_alpha1_min": dfa["dfa_alpha1_min"],
-        "dfa_alpha1_median": dfa["dfa_alpha1_median"],
-        "dfa_window_count": dfa["dfa_window_count"],
         "cardiac_drift": cardiac_drift(tdata, sport_lower),
         "max_hrr_60s": max_hrr_60s(tdata),
         "durability_pct": durability(tdata, sport_lower),
-        "aet_hr_dfa": dfa["aet_hr_dfa"],
-        "ant_hr_dfa": dfa["ant_hr_dfa"],
-        "dfa_quality": dfa["dfa_quality"],
-        # Proxy se počítá vždy a zůstává jen tady. Dřív se při chybějící DFA
-        # propsal i do aet_hr_dfa, takže odhad ze zlomu linearity tep↔rychlost
-        # vystupoval jako práh spočítaný z R-R intervalů.
-        "aet_hr_proxy": dfa_alpha1_proxy(tdata),
         "resp_rate_rsa": respiration_from_rr(rr_ms),
     }

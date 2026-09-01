@@ -40,7 +40,7 @@ def test_ema_uses_true_decay_constant():
 def test_tsb_uses_previous_day():
     """TSB je ranní forma PŘED dnešním tréninkem → posun o jeden den."""
     cal = _calendar(10)
-    daily = pd.DataFrame({"trimp": [50.0] * 10, "trimp_epoc": [50.0] * 10}, index=cal)
+    daily = pd.DataFrame({"trimp": [50.0] * 10}, index=cal)
     out = compute_ctl_atl_tsb(daily)
 
     assert pd.isna(out["tsb"].iloc[0])  # první den nemá „včera"
@@ -59,7 +59,7 @@ def test_ctl_reacts_slower_than_atl():
     """
     cal = _calendar(30)
     trimp = [0.0] * 5 + [100.0] * 25
-    daily = pd.DataFrame({"trimp": trimp, "trimp_epoc": trimp}, index=cal)
+    daily = pd.DataFrame({"trimp": trimp}, index=cal)
     out = compute_ctl_atl_tsb(daily)
 
     assert CTL_DAYS > ATL_DAYS
@@ -71,7 +71,7 @@ def test_ctl_recovers_slower_than_atl_after_rest():
     """Po vysazení musí únava opadat rychleji, než mizí fitness."""
     cal = _calendar(60)
     trimp = [100.0] * 40 + [0.0] * 20
-    daily = pd.DataFrame({"trimp": trimp, "trimp_epoc": trimp}, index=cal)
+    daily = pd.DataFrame({"trimp": trimp}, index=cal)
     out = compute_ctl_atl_tsb(daily)
 
     assert out["atl"].iloc[-1] < out["ctl"].iloc[-1]
@@ -110,7 +110,7 @@ def test_rest_days_are_zero_not_missing():
 def test_acwr_sweet_spot_for_steady_load():
     """Konstantní zátěž musí dát ACWR = 1.0 (akutní == chronická)."""
     cal = _calendar(60)
-    daily = pd.DataFrame({"trimp": [60.0] * 60, "trimp_epoc": [60.0] * 60}, index=cal)
+    daily = pd.DataFrame({"trimp": [60.0] * 60}, index=cal)
     daily = compute_ctl_atl_tsb(daily)
     out = compute_acwr(daily)
     assert out["acwr"].iloc[-1] == pytest.approx(1.0)
@@ -122,7 +122,7 @@ def test_acwr_is_not_clipped():
     """Hodnoty > 1.5 jsou legitimní signál, ne chyba k oříznutí."""
     cal = _calendar(60)
     trimp = [10.0] * 50 + [200.0] * 10
-    daily = pd.DataFrame({"trimp": trimp, "trimp_epoc": trimp}, index=cal)
+    daily = pd.DataFrame({"trimp": trimp}, index=cal)
     daily = compute_ctl_atl_tsb(daily)
     out = compute_acwr(daily)
     assert out["acwr"].iloc[-1] > 1.5

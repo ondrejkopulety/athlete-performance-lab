@@ -20,10 +20,24 @@ from src.ingestion.sport import cycling_mask
 # historická hodnota, kterou se výsledky drží.
 EFFICIENCY_TREND_WINDOW = 14
 
-# Fyziologický strop monotonie. Při nízké odchylce a vysoké průměrné zátěži
+# Grade-Adjusted Distance: metr stoupání se do jmenovatele efektivity počítá
+# jako ekvivalent GRADE_ADJ_M_PER_ASCENT_M metru roviny. TRIMP (z tepu) už
+# vyšší cenu kopce zachycuje, takže dělení HOLÝMI km dělá z kopcovitého dne
+# falešnou „skrytou únavu" (vysoký TRIMP/km) – fatigue_index pak čte profil
+# trasy jako fyziologii. Faktor 10 (≈ energetická cena výškového metru vůči
+# jízdě po rovině) je hrubý, ale vrací terénní citlivost do řádu šumu.
+GRADE_ADJ_M_PER_ASCENT_M = 10.0
+
+# Strop REPORTOVANÉ monotonie. Při nízké odchylce a vysoké průměrné zátěži
 # by hodnota nereálně explodovala; epsilon brání dělení nulou.
 MONOTONY_CAP = 4.0
 MONOTONY_EPSILON = 1e-5
+# Strop monotonie vstupující do STRAINU. Foster strain se počítá z neořezané
+# monotonie (viz compute_monotony_strain), ale degenerovaný týden se sedmi
+# identickými nenulovými dny má SD ≈ 0 a poměr mean/SD by vyletěl do milionů.
+# 10 je nad jakoukoli reálnou týdenní monotonií (naměřené maximum ~3,5),
+# takže reálná data se nedotkne a stláčí jen tenhle patologický případ.
+STRAIN_MONOTONY_CAP = 10.0
 
 ZONE_COLUMNS = ["time_in_z1", "time_in_z2", "time_in_z3", "time_in_z4", "time_in_z5"]
 
@@ -37,19 +51,31 @@ def compute_monotony_strain(daily: pd.DataFrame) -> pd.DataFrame:
     """
     Fosterova monotonie a strain nad 7denním oknem denního TRIMP.
 
-        Monotony = mean(TRIMP) / std(TRIMP)
-        Strain   = Monotony × sum(TRIMP)
+        Monotony = mean(TRIMP) / std(TRIMP)      (populační SD, ddof=0)
+        Strain   = Monotony_raw × sum(TRIMP)
         Whoop    = 21 × (1 − exp(−0.005 × denní TRIMP))
+
+    Dvě věci podle původní definice (Foster & Fitz-Gerald 1996):
+
+      • **Populační směrodatná odchylka** (``ddof=0``). Pandas default je
+        výběrová (``ddof=1``), což monotonii nad 7denním oknem podhodnocuje
+        faktorem √(6/7) ≈ 0,93 – pásmo „vysoká > 2.0" by se rozsvěcelo
+        později, než Foster zamýšlel.
+
+      • **Strain z NEOŘEZANÉ monotonie.** Strop 4.0 (``MONOTONY_CAP``) platí
+        jen na reportovanou ``monotony``; do strainu jde surová hodnota.
+        V nejmonotónnějších týdnech (kde monotonie narazí na strop) je
+        strain jinak uměle stlačený právě tam, kde má nejvíc varovat.
     """
     daily = daily.copy()
     roll = daily["trimp"].rolling(window=MONOTONY_WINDOW, min_periods=MONOTONY_WINDOW)
     roll_mean = roll.mean()
-    roll_std = roll.std()
+    roll_std = roll.std(ddof=0)
     roll_sum = roll.sum()
 
-    monotony = (roll_mean / (roll_std + MONOTONY_EPSILON)).clip(upper=MONOTONY_CAP)
-    daily["monotony"] = monotony.round(2)
-    daily["strain"] = (monotony * roll_sum).round(1)
+    monotony_raw = roll_mean / (roll_std + MONOTONY_EPSILON)
+    daily["monotony"] = monotony_raw.clip(upper=MONOTONY_CAP).round(2)
+    daily["strain"] = (monotony_raw.clip(upper=STRAIN_MONOTONY_CAP) * roll_sum).round(1)
     daily["whoop_strain"] = (21 * (1 - np.exp(-0.005 * daily["trimp"]))).round(2)
     return daily
 
@@ -98,7 +124,14 @@ def compute_polarization(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.Da
 
 def compute_efficiency_index(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.DataFrame:
     """
-    Efficiency index = TRIMP / km, agregovaně sum(TRIMP)/sum(km) za den.
+    Efficiency index = TRIMP / grade-adjusted km, agregovaně za den.
+
+    Jmenovatel je vzdálenost upravená o převýšení
+    (``km + ascent_m/1000 × GRADE_ADJ_M_PER_ASCENT_M``), ne holé km.
+    TRIMP z tepu už vyšší cenu stoupání zachycuje, takže dělení holými km
+    dělalo z kopcovitého dne falešnou „skrytou únavu" (vysoký TRIMP/km) a
+    ``fatigue_index`` pak četl profil trasy jako fyziologii. Když
+    ``ascent_m`` chybí, spadne to zpět na holé km.
 
     Agregace přes součty (ne průměr per-activity) záměrně: jinak by krátká
     intenzivní jízda s vysokým TRIMP/km převážila celodenní objem.
@@ -137,9 +170,12 @@ def compute_efficiency_index(daily: pd.DataFrame, activities: pd.DataFrame) -> p
     if cardio.empty:
         return daily
 
+    ascent = pd.to_numeric(cardio.get("ascent_m"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    cardio["_gad_km"] = cardio["distance_km"] + ascent / 1000.0 * GRADE_ADJ_M_PER_ASCENT_M
+
     agg = cardio.groupby("date").agg(
         _sum_trimp=("total_trimp", "sum"),
-        _sum_km=("distance_km", "sum"),
+        _sum_km=("_gad_km", "sum"),
     )
     eff = (agg["_sum_trimp"] / agg["_sum_km"]).to_frame("daily_efficiency")
 

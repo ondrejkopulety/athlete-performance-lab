@@ -48,41 +48,35 @@ log = logging.getLogger("analytics.pipeline")
 ACTIVITY_METRIC_COLUMNS = [
     "trimp_adjusted", "rhr_used",
     "best_20min_hr", "best_30min_hr", "best_60min_hr",
-    "dfa_alpha1_min", "dfa_alpha1_median", "dfa_window_count",
     "cardiac_drift", "max_hrr_60s", "durability_pct", "vam_m_per_h",
-    "avg_gradient_pct", "climb_category", "aet_hr_dfa", "ant_hr_dfa",
-    "aet_hr_proxy", "dfa_quality", "resp_rate_rsa", "epoc_score",
-    # Diagnostiku R-R plní src/physio/persist.py, ne tahle pipeline –
-    # v seznamu je proto není, aby ji přepočet metrik nepřepsal na NULL.
+    "avg_gradient_pct", "climb_category",
+    "resp_rate_rsa", "epoc_score",
+    # Diagnostiku R-R (dfa_quality, rr_*) plní src/physio/persist.py, ne
+    # tahle pipeline – v seznamu proto není, aby ji přepočet nepřepsal na NULL.
     "time_at_threshold_min", "tte_z4z5_min",
-    # critical_hr už není per-activity – je to jedna atletova hodnota
-    # (85. percentil přes celou historii) a přesunula se do daily_metrics.
-    "tati_score", "fat_kcal", "carb_kcal", "fat_g",
+    "fat_kcal", "carb_kcal", "fat_g",
     "carb_g", "fluid_loss_l", "heat_flag",
 ]
 
-# Sloupce, které plní jen `compute_activity_series_metrics` (vteřinová data
-# + R-R). U aktivit mimo `is_series_eligible` – typicky elektrokolo – se musí
-# aktivně vynulovat: přepočet jinak ponechá staré hodnoty z předchozí verze,
-# protože payload se skládá z už načteného `activities` DataFrame.
+# Sloupce, které plní jen `compute_activity_series_metrics` (vteřinová data).
+# U aktivit mimo `is_series_eligible` – typicky elektrokolo – se musí aktivně
+# vynulovat: přepočet jinak ponechá staré hodnoty z předchozí verze, protože
+# payload se skládá z už načteného `activities` DataFrame.
 SERIES_ONLY_COLUMNS = [
     "best_20min_hr", "best_30min_hr", "best_60min_hr",
-    "dfa_alpha1_min", "dfa_alpha1_median", "dfa_window_count",
-    "cardiac_drift", "max_hrr_60s", "durability_pct",
-    "aet_hr_dfa", "ant_hr_dfa", "aet_hr_proxy", "dfa_quality", "resp_rate_rsa",
+    "cardiac_drift", "max_hrr_60s", "durability_pct", "resp_rate_rsa",
 ]
 
 # Metriky odvozené z celé historie, ne z jedné aktivity. Musí se
-# přepisovat u všech řádků, jinak by se v tabulce míchaly různé prahy.
-GLOBAL_METRIC_COLUMNS = ["tati_score", "trimp_load_percentile"]
+# přepisovat u všech řádků, jinak by se v tabulce míchaly různé škály.
+GLOBAL_METRIC_COLUMNS = ["trimp_load_percentile"]
 
 DAILY_METRIC_COLUMNS = [
-    "trimp", "trimp_epoc", "ctl", "atl", "tsb",
+    "trimp", "ctl", "atl", "tsb",
     "acwr", "ctl_ramp_rate", "ctl_ramp_warning",
     "monotony", "strain", "whoop_strain",
     "daily_efficiency", "ef_trend", "fatigue_index",
     "polarization_low_pct", "polarization_high_pct", "z3_junk_pct",
-    "critical_hr",
     "readiness_score", "pure_recovery_score",
     "hrv_last_night", "hrv_weekly_avg", "hrv_cv_pct",
     "rhr_day", "rhr_baseline_14d", "rhr_baseline_90d", "rhr_elevation_bpm",
@@ -111,7 +105,6 @@ ROUND_MAP = {
     "sleep_need_min": 0, "sleep_performance_pct": 1,
     "hrv_cv_pct": 1,
     "polarization_low_pct": 1, "polarization_high_pct": 1,
-    "critical_hr": 0,
     "acwr": 2, "ctl_ramp_rate": 2,
     "fatigue_index": 3,
     "fat_kcal_daily": 0, "carb_kcal_daily": 0,
@@ -246,17 +239,14 @@ def compute_activity_metrics(
         ].copy()
         payload["metrics_version"] = ACTIVITY_METRICS_VERSION
         payload["computed_at"] = datetime.now()
-        for int_col in ("aet_hr_dfa", "ant_hr_dfa", "aet_hr_proxy"):
-            if int_col in payload.columns:
-                payload[int_col] = pd.to_numeric(payload[int_col], errors="coerce").round().astype("Int64")
         repo.upsert_activity_metrics(session, repo.records_to_dicts(payload))
         result.activities_recomputed = len(payload)
 
     # ── Globálně odvozené metriky se zapisují VŽDY pro všechny aktivity ───
-    # Critical HR je 85. percentil napříč celou historií, takže každá nová
-    # aktivita posune práh i pro roky staré záznamy. Kdyby se zapisovaly jen
-    # přepočítané řádky, zůstala by v tabulce směs starých a nových prahů
-    # a TATI by nešlo porovnávat napříč sezónami.
+    # trimp_load_percentile je pořadí napříč celou historií, takže každá nová
+    # aktivita posune percentil i pro roky staré záznamy. Kdyby se zapisovaly
+    # jen přepočítané řádky, zůstala by v tabulce směs starých a nových
+    # percentilů a nešly by porovnávat napříč sezónami.
     if stale and not force:
         globals_payload = activities[
             ["activity_id", *[c for c in GLOBAL_METRIC_COLUMNS if c in activities.columns]]
@@ -332,24 +322,6 @@ def _compute_lthr(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.DataFrame
     return daily
 
 
-def _broadcast_critical_hr(daily: pd.DataFrame, activities: pd.DataFrame) -> pd.DataFrame:
-    """
-    Critical HR jako denní metrika.
-
-    Je to jedna atletova hodnota (85. percentil průměrného tepu přes celou
-    historii kardio aktivit, viz activity.compute_critical_hr), ne per-activity
-    číslo – v master exportu byla 884× stejná. Sem se propíše konstantou;
-    day-to-day varianta by chtěla expanding percentil, což zatím nemáme.
-    """
-    daily = daily.copy()
-    daily["critical_hr"] = np.nan
-    if activities is not None and not activities.empty and "critical_hr" in activities.columns:
-        vals = pd.to_numeric(activities["critical_hr"], errors="coerce").dropna()
-        if not vals.empty:
-            daily["critical_hr"] = float(vals.iloc[-1])
-    return daily
-
-
 def compute_daily_metrics(session: Session, activities: pd.DataFrame) -> pd.DataFrame:
     """
     Denní metriky nad celým kalendářem.
@@ -375,7 +347,6 @@ def compute_daily_metrics(session: Session, activities: pd.DataFrame) -> pd.Data
     daily = advice.compute_coach_advice(daily)
     daily = quality.compute_polarization(daily, activities)
     daily = _compute_lthr(daily, activities)
-    daily = _broadcast_critical_hr(daily, activities)
 
     return daily.round({k: v for k, v in ROUND_MAP.items() if k in daily.columns})
 

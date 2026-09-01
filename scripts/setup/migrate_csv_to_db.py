@@ -97,16 +97,14 @@ METRIC_COL_MAP = {
     "vam_m_per_h": "vam_m_per_h",
     "avg_gradient_pct": "avg_gradient_pct",
     "climb_category": "climb_category",
-    "aet_hr_dfa": "aet_hr_dfa",
-    "ant_hr_dfa": "ant_hr_dfa",
-    "aet_hr_proxy": "aet_hr_proxy",
+    # dfa_quality = posudek pravosti R-R, sloupec zůstává (plní ho krok `rr`).
+    # DFA-alpha1 prahy, aet_hr_proxy, critical_hr a tati_score byly odstraněny
+    # (audit doménové logiky 8/2026) – z CSV se už neimportují.
     "dfa_quality": "dfa_quality",
     "resp_rate_rsa": "resp_rate_rsa",
     "epoc_score": "epoc_score",
     "time_at_threshold_min": "time_at_threshold_min",
     "tte_z4z5_min": "tte_z4z5_min",
-    "critical_hr": "critical_hr",
-    "tati_score": "tati_score",
     "fat_kcal": "fat_kcal",
     "carb_kcal": "carb_kcal",
     "fat_g": "fat_g",
@@ -146,9 +144,6 @@ def migrate_activities(session) -> int:
     metrics = _numeric(metrics, [c for c in present.values() if c not in ("climb_category", "dfa_quality", "heat_flag")])
     if "heat_flag" in metrics.columns:
         metrics["heat_flag"] = _to_bool(metrics["heat_flag"])
-    for int_col in ("aet_hr_dfa", "ant_hr_dfa", "aet_hr_proxy"):
-        if int_col in metrics.columns:
-            metrics[int_col] = metrics[int_col].round().astype("Int64")
     metrics["metrics_version"] = 0
 
     n_metrics = repo.upsert_activity_metrics(session, repo.records_to_dicts(metrics))

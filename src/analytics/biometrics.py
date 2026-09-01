@@ -54,15 +54,28 @@ def _series_from(biometrics: pd.DataFrame, column: str, index: pd.DatetimeIndex)
     return pd.to_numeric(s, errors="coerce").reindex(index)
 
 
-def _rolling_on_present(values: pd.Series, window: int, min_periods: int, stat: str) -> pd.Series:
+def _rolling_on_present(
+    values: pd.Series,
+    window: int,
+    min_periods: int,
+    stat: str,
+    exclude_self: bool = False,
+) -> pd.Series:
     """
     Klouzavá statistika počítaná jen nad dny, kdy měření existuje.
 
     Výsledek se vrací zpět na původní (kalendářní) index.
+
+    ``exclude_self=True`` posune okno o jedno měření zpět (shift(1) NAD
+    přítomnými hodnotami, ne nad kalendářem), takže baseline stojí výhradně
+    na PŘEDCHOZÍCH měřeních. Bez toho si den s propadem HRV / elevací RHR
+    stáhne vlastní referenci a signál, který má detekovat, si sám tlumí.
     """
     present = values.dropna()
     if present.empty:
         return pd.Series(np.nan, index=values.index)
+    if exclude_self:
+        present = present.shift(1)
     roll = present.rolling(window=window, min_periods=min_periods)
     out = roll.mean() if stat == "mean" else roll.std()
     return out.reindex(values.index)
@@ -132,13 +145,17 @@ def compute_recovery(daily: pd.DataFrame, biometrics: pd.DataFrame) -> pd.DataFr
             src.drop_duplicates("date", keep="last").set_index("date")["source"].reindex(idx)
         )
 
-    # ── HRV složka (40 %) – poměr k 7dennímu baseline ───────────────────────
-    hrv_baseline = _rolling_on_present(hrv_last, window=7, min_periods=3, stat="mean")
+    # ── HRV složka (40 %) – poměr k 7dennímu baseline z PŘEDCHOZÍCH dní ──────
+    hrv_baseline = _rolling_on_present(
+        hrv_last, window=7, min_periods=3, stat="mean", exclude_self=True
+    )
     ratio = hrv_last / hrv_baseline
     hrv_component = ((ratio.clip(0.7, 1.3) - 0.7) / 0.6) * 100  # 0.7→0, 1.3→100
 
-    # ── RHR složka (30 %) – odchylka od 14denního baseline ──────────────────
-    rhr_baseline = _rolling_on_present(rhr, window=RHR_BASELINE_DAYS, min_periods=5, stat="mean")
+    # ── RHR složka (30 %) – odchylka od 14denního baseline z PŘEDCHOZÍCH dní ─
+    rhr_baseline = _rolling_on_present(
+        rhr, window=RHR_BASELINE_DAYS, min_periods=5, stat="mean", exclude_self=True
+    )
     diff = rhr - rhr_baseline  # záporné = nižší tep = lepší
     rhr_component = (1 - (diff.clip(-5, 10) + 5) / 15) * 100
     daily["rhr_baseline_14d"] = rhr_baseline.round(1)
@@ -161,9 +178,12 @@ def compute_recovery(daily: pd.DataFrame, biometrics: pd.DataFrame) -> pd.DataFr
         (sleep_dur / sleep_need.replace(0, np.nan)) * 100
     ).round(1)
 
-    # ── HRV koeficient variace (7 dní, z hrubého RMSSD) ─────────────────────
-    hrv_std = hrv_last.rolling(7, min_periods=3).std()
-    hrv_mean = hrv_last.rolling(7, min_periods=3).mean()
+    # ── HRV koeficient variace (7 měření, z hrubého RMSSD) ──────────────────
+    # Stejná konvence okna jako hrv_baseline výš: nad PŘÍTOMNÝMI hodnotami,
+    # ne nad kalendářní řadou s NaN – jinak „7denní CV" a „7denní baseline"
+    # stojí každý na jinak dlouhém úseku dat.
+    hrv_std = _rolling_on_present(hrv_last, window=7, min_periods=3, stat="std")
+    hrv_mean = _rolling_on_present(hrv_last, window=7, min_periods=3, stat="mean")
     daily["hrv_cv_pct"] = ((hrv_std / hrv_mean.replace(0, np.nan)) * 100).round(1)
 
     return daily
@@ -191,8 +211,12 @@ def compute_readiness(daily: pd.DataFrame) -> pd.DataFrame:
     tsb_normed = ((tsb.clip(-30, 10) + 30) / 40) * 100
 
     hrv = pd.to_numeric(daily.get("hrv_last_night", pd.Series(np.nan, index=daily.index)), errors="coerce")
-    hrv_30d_mean = _rolling_on_present(hrv, window=30, min_periods=7, stat="mean")
-    hrv_30d_std = _rolling_on_present(hrv, window=30, min_periods=7, stat="std").replace(0, np.nan)
+    # Baseline z PŘEDCHOZÍCH měření (exclude_self) – dnešní propad HRV si
+    # nesmí stáhnout vlastní 30denní průměr a tím zeslabit z-skóre.
+    hrv_30d_mean = _rolling_on_present(hrv, window=30, min_periods=7, stat="mean", exclude_self=True)
+    hrv_30d_std = _rolling_on_present(
+        hrv, window=30, min_periods=7, stat="std", exclude_self=True
+    ).replace(0, np.nan)
     hrv_z = ((hrv - hrv_30d_mean) / hrv_30d_std).clip(-3, 3)
     normed_hrv = ((hrv_z + 3) / 6) * 100  # −3 → 0, +3 → 100
 

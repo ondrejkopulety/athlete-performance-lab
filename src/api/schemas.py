@@ -27,7 +27,6 @@ class DailyMetricsOut(BaseModel):
 
     date: date
     trimp: float | None = None
-    trimp_epoc: float | None = None
     ctl: float | None = None
     atl: float | None = None
     tsb: float | None = None
@@ -43,7 +42,6 @@ class DailyMetricsOut(BaseModel):
     polarization_low_pct: float | None = None
     polarization_high_pct: float | None = None
     z3_junk_pct: float | None = None
-    critical_hr: float | None = None
     readiness_score: float | None = None
     pure_recovery_score: float | None = None
     hrv_last_night: float | None = None
@@ -127,15 +125,10 @@ class ActivityDetailOut(ActivityOut):
     vam_m_per_h: float | None = None
     avg_gradient_pct: float | None = None
     climb_category: str | None = None
-    aet_hr_dfa: int | None = None
-    ant_hr_dfa: int | None = None
     dfa_quality: str | None = None
     resp_rate_rsa: float | None = None
     epoc_score: float | None = None
     time_at_threshold_min: float | None = None
-    # critical_hr je teď denní metrika (viz DailyMetricsOut) – jedna atletova
-    # hodnota, ne per-activity.
-    tati_score: float | None = None
     # Percentilové pořadí TRIMP vůči vlastní historii kardio aktivit –
     # podklad pro verdikt/gauge, viz activity.py:compute_trimp_load_percentile.
     trimp_load_percentile: float | None = None

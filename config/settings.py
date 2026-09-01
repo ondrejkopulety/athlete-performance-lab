@@ -45,8 +45,15 @@ RESTING_HR      = 49           # Resting heart rate (bpm) – fallback jen bez m
 # (v datech avg_hr až 3), hrudní pás zas krátké špičky nad 220. Takové
 # vzorky se zahazují (→ NULL) při parsování FITu i před výpočtem tepové
 # křivky, aby neředily avg_hr ani nenafoukly nejvyšší okno křivky.
+#
+# Horní strop 205, ne 225: naměřené maximum je 199 bpm (MAX_HR), takže
+# jakýkoli vzorek nad ~205 je artefakt hrudního pásu. Strop 225 propouštěl
+# špičky 200–225 do tepové křivky (hr_curve_5s/10s/30s) a odtud do
+# best_20min_hr → lthr_estimate. Jeden absolutní strop pro VŠE: syrové
+# records, tepová křivka, avg_hr i max_hr. TRIMP samo dál klipuje tepovou
+# rezervu na 1.0 při HR ≥ MAX_HR, takže se výpočtu zátěže netýká.
 HR_PLAUSIBLE_MIN_BPM = 25
-HR_PLAUSIBLE_MAX_BPM = 225
+HR_PLAUSIBLE_MAX_BPM = 205
 
 # Hardcoded heart rate zones (bpm) – measured from lactate tests / personal experience.
 # Each zone is (lower_bound_inclusive, upper_bound_inclusive).
@@ -69,14 +76,19 @@ ATL_DAYS        = 7            # Acute Training Load window
 CTL_RAMP_WARN   = 8.0          # CTL ramp rate → burnout warning
 
 # ACWR (Acute : Chronic Workload Ratio)
+#
+# UNCOUPLED model (Gabbett 2019+): akutní okno = posledních 7 dní, chronické
+# okno = dny 8–28 (tj. 21 dní PŘED akutním oknem, ne včetně něj). Coupled
+# varianta (7denní průměr / 28denní průměr, kde akutní ⊂ chronické) uměle
+# zvyšuje autokorelaci čitatele a jmenovatele a tlačí poměr k 1.
+#
+# Počítá se z čisté denní TRIMP (ne EPOC-vážené), aby platily literární
+# prahy 0.8–1.3 „sweet spot" / > 1.5 „danger", které jsou z čistého load.
 ACWR_ACUTE_DAYS   = 7
-ACWR_CHRONIC_DAYS = 28
-# Minimální počet aktivních dní (TRIMP > 0) v 28denním chronickém okně, jinak
-# je ACWR NULL. Když v okně proběhla jediná jednotka, spadne poměr mechanicky
-# na ACWR_CHRONIC_DAYS/ACWR_ACUTE_DAYS = 4.0 bez ohledu na velikost zátěže
-# ((X/7)/(X/28) = 4). V datech takhle vzniklo 25 dní s hodnotou přesně 4.00,
-# které nevypovídají o riziku, jen o řídkém tréninku – `chronic != 0` proti
-# tomu nechrání, jmenovatel je nepatrný, ne nulový.
+ACWR_CHRONIC_DAYS = 28   # konec chronického okna; jeho začátek je ACWR_ACUTE_DAYS + 1
+# Minimální počet aktivních dní (TRIMP > 0) v chronickém okně, jinak je ACWR
+# NULL. Uncoupled model to potřebuje míň (nesdílí čitatel se jmenovatelem),
+# ale řídký trénink v chronickém okně pořád dělá poměr nestabilní.
 ACWR_MIN_ACTIVE_DAYS = 5
 
 # TRIMP constants (male Banister model)
@@ -138,10 +150,12 @@ KCAL_PER_MIN_BY_ZONE   = {"Z1": 6, "Z2": 8, "Z3": 10, "Z4": 12, "Z5": 14}
 # Durability
 DURABILITY_MIN_DURATION_MIN = 120   # minimum 2 h activity for durability
 
-# DFA alpha-1
-DFA_WINDOW_BEATS       = 200
-DFA_AET_THRESHOLD      = 0.75  # α1 at aerobic threshold
-DFA_ANT_THRESHOLD      = 0.50  # α1 at anaerobic threshold
+# DFA-alpha1 prahy (aet_hr_dfa / ant_hr_dfa) byly odstraněny při auditu
+# doménové logiky (8/2026): žádný FIT tohoto atleta neobsahuje pravé
+# beat-to-beat R-R intervaly (viz src/physio/quality.py – všech 79 souborů
+# s hrv zprávami nese kvantizovanou tepovou křivku), takže metoda nikdy
+# neměla z čeho počítat. Posudek pravosti R-R řady zůstává jako dfa_quality
+# (plní ho krok `rr` v src/physio).
 
 # ============================================================
 # R-R INTERVALY (src/physio)
@@ -329,33 +343,47 @@ DATABASE_URL: str = os.getenv("DATABASE_URL") or (
 #       resp_rate_rsa a vam_m_per_h se pro e_bike nepočítají – motor rozbíjí
 #       vztah výkon↔tep. TRIMP a minuty v zónách zůstávají (elektro se dál
 #       počítá do formy). Viz sport.is_ebike.
-ACTIVITY_METRICS_VERSION: int = 7  # (8/2026) čtyři opravy dohromady:
-#       – cardiac_drift a durability_pct: fallback na speed u kola bez
-#         wattmetru (jen na rovině), dřív vycházely None pro celou databázi
-#         bez power dat (18 z 884 aktivit);
-#       – kanonizace sportu: mountain_biking / ride / gravel_cycling atd. se
-#         teď skládají do "cycling/*", takže MTB projde jako kardio a jako kolo
-#         (dřív bral drift/durability jako běh);
-#       – klidový tep: fallback RESTING_HR 41 → 49 (blíž naměřenému baseline),
-#         mění trimp_adjusted dní bez měření RHR;
-#       – implausibilní okamžitý tep (< 25 / > 225 bpm) se zahazuje před
-#         výpočtem, čistí avg_hr, best_Nmin_hr a odtud lthr_estimate.
+#   7 = (8/2026) fallback na speed u drift/durability bez wattmetru,
+#       kanonizace sportu do "cycling/*", RESTING_HR 41 → 49, strop
+#       okamžitého tepu 225.
+ACTIVITY_METRICS_VERSION: int = 8  # (8/2026) audit doménové logiky:
+#       – strop okamžitého tepu 225 → 205 bpm (HR_PLAUSIBLE_MAX_BPM): jeden
+#         absolutní clamp pro records, tepovou křivku i avg/max_hr. Mění
+#         best_Nmin_hr a odtud lthr_estimate u jízd se špičkami 205–225;
+#       – cardiac_drift a durability_pct: půlky se průměrují ČASOVĚ vážené
+#         (na 1Hz mřížce), ne jako nevážený průměr záznamů. Power větev
+#         používá Normalized Power (30s klouzavý průměr, 4. mocnina), ne
+#         prostý průměr výkonu;
+#       – R-R filtr (respiration_from_rr) sjednocen na rolling-medián
+#         (src/physio/rr_clean); meze z RR_MIN/MAX_SECONDS;
+#       – ODSTRANĚNO: aet_hr_dfa / ant_hr_dfa (DFA-alpha1 prahy – žádný FIT
+#         nemá pravé beat-to-beat R-R), aet_hr_proxy (zlom linearity
+#         tep↔rychlost), tati_score / critical_hr (Monod-Scherrer na tep) –
+#         všechno bez fyziologické opory. Padly i diagnostiky dfa_alpha1_*.
 
 # Bump when a daily formula changes → vynutí full rebuild daily_metrics.
 #   2 = 90denní baseline klidového tepu, lthr_estimate
 #   3 = zrušena recovery_tax_hours_daily, přibyl Garmin Training Readiness
 #   4 = osa začíná první aktivitou, ne první biometrií (viz calendar.py)
 #   5 = nové tepové zóny – změna Z3/Z4/Z5 (8/2026)
-DAILY_METRICS_VERSION: int = 6  # (8/2026):
-#       – ACWR je NULL, když v 28denním okně bylo < ACWR_MIN_ACTIVE_DAYS
-#         aktivních dní (dřív mechanická 4.00 u řídkého tréninku);
-#       – daily_efficiency ignoruje jízdy bez tepu (TRIMP 0 → dělení dávalo 0,
-#         to otravovalo ef_trend a fatigue_index);
-#       – readiness_score je NULL ve dnech bez zátěže (CTL≈ATL≈0) i bez
-#         biometrie – legacy vzorec tam vracel fixních 75 (fixní bod TSB=0);
-#       – polarization_efficiency zrušeno (bylo jen ≈ 105 − 2·z3_junk_pct);
-#       – critical_hr přesunuto z activity_metrics do daily_metrics;
-#       – fallback RESTING_HR 41 → 49 (přes trimp_adjusted).
+#   6 = (8/2026) ACWR NULL u řídkého tréninku, daily_efficiency ignoruje
+#       jízdy bez tepu, readiness_score NULL bez zátěže, polarization_efficiency
+#       zrušeno, critical_hr do daily_metrics, RESTING_HR 41 → 49.
+DAILY_METRICS_VERSION: int = 7  # (8/2026) audit doménové logiky:
+#       – monotonie používá populační SD (ddof=0), jak ji definuje Foster;
+#         strain se počítá z NEOŘEZANÉ monotonie (clip 4.0 platí jen na
+#         reportovanou hodnotu, ne na vstup do strainu);
+#       – ACWR je UNCOUPLED (akutní 7 d vs. chronické dny 8–28) a počítá se
+#         z čisté TRIMP, ne z EPOC-vážené – aby platily literární prahy;
+#       – daily_efficiency používá grade-adjusted distance (km + převýšení
+#         jako ekvivalent roviny), takže kopcovitý den nevypadá jako skrytá
+#         únava (fatigue_index);
+#       – HRV i RHR baseline v recovery/readiness se počítají z PŘEDCHOZÍCH
+#         dní (shift(1)) a jednotně přes _rolling_on_present – dnešní propad
+#         si netlumí vlastní referenci;
+#       – ODSTRANĚNO: critical_hr (Monod-Scherrer na tep nedává smysl) a
+#         trimp_epoc (EPOC-vážená TRIMP – po přechodu ACWR na čistou TRIMP
+#         už ji nic nečetlo).
 
 # ============================================================
 # PRAHOVÝ TEP Z TERÉNNÍCH DAT (LTHR)
@@ -494,8 +522,10 @@ THRESHOLD_STALE_DAYS = 90
 #   3 = implausibilní okamžitý tep (< HR_PLAUSIBLE_MIN_BPM / > HR_PLAUSIBLE_MAX_BPM)
 #       se zahazuje před přeindexováním na sekundovou mřížku – glitch senzoru
 #       jinak nafoukl nejvyšší okno křivky (hr_curve_60s až 199.9)
-HR_CURVE_VERSION: int = 3
-HR_BLOCKS_VERSION: int = 3
+#   4 = HR_PLAUSIBLE_MAX_BPM 225 → 205: špičky hrudního pásu 205–225 už
+#       neprosakují do krátkých oken křivky ani do bloků
+HR_CURVE_VERSION: int = 4
+HR_BLOCKS_VERSION: int = 4
 
 # Kolik dní historie načíst před prvním "dirty" dnem, aby rolling okna
 # (monotony 7d, ACWR 7/28d, polarizace 14d, HRV z-score 30d, strain kvantil 30d)
@@ -555,8 +585,10 @@ METRIC_META: dict[str, dict] = {
     # ── Riziko ─────────────────────────────────────────────────────────────
     "acwr": {
         "unit": "poměr", "direction": "sweet_spot", "sweet_spot": [0.8, 1.3],
-        "note": f"Acute:Chronic Workload Ratio – {ACWR_ACUTE_DAYS}d průměr / "
-                f"{ACWR_CHRONIC_DAYS}d průměr, počítáno z EPOC-vážené TRIMP. Neclipováno.",
+        "note": f"Acute:Chronic Workload Ratio (uncoupled) – průměr TRIMP za "
+                f"posledních {ACWR_ACUTE_DAYS} dní / průměr za dny "
+                f"{ACWR_ACUTE_DAYS + 1}–{ACWR_CHRONIC_DAYS}. Z čisté TRIMP, "
+                f"neclipováno.",
         "bands": {
             "< 0.8": "undertrained, ztráta formy",
             "0.8 až 1.3": "sweet spot",
@@ -694,7 +726,9 @@ METRIC_META: dict[str, dict] = {
     "cardiac_drift": {
         "unit": "%", "direction": "lower_is_better",
         "note": "Aerobní decoupling Pa:HR. Po 10min rozjezdu se aktivita dělí na "
-                "poloviny podle času; EF = power/HR (kolo) nebo speed/HR (běh). "
+                "poloviny podle času; průměry obou půlek jsou ČASOVĚ vážené "
+                "(1Hz mřížka). EF = NP/HR (kolo s wattmetrem, NP = normalizovaný "
+                "výkon) nebo speed/HR (jinak, jen na rovině). "
                 "Drift = (EF1 − EF2) / EF1 × 100.",
         "bands": {"< 5": "dobrá aerobní odolnost", "> 5": "decoupling, únava nebo horko"},
     },
@@ -705,22 +739,14 @@ METRIC_META: dict[str, dict] = {
     },
     "durability_pct": {
         "unit": "%", "direction": "higher_is_better",
-        "note": "Změna efektivity mezi 1. a 2. polovinou aktivity delší než 2 h. "
+        "note": "Změna efektivity mezi 1. a 2. polovinou aktivity delší než 2 h "
+                "(časově vážené průměry, NP/HR nebo speed/HR jako u cardiac_drift). "
                 "Záporné = pokles výkonu = únava.",
     },
     "vam_m_per_h": {
         "unit": "m/h", "direction": "higher_is_better",
         "note": "Velocità Ascensionale Media = převýšení / čas do kopce. "
                 "Jen pro aktivity s průměrným gradientem > 4 %.",
-    },
-    "aet_hr_dfa": {
-        "unit": "bpm", "direction": "higher_is_better",
-        "note": f"Aerobní práh z DFA-alpha1 = {DFA_AET_THRESHOLD} (neurokit2 nad R-R "
-                "intervaly). Fallback proxy z linearity HR vs rychlost.",
-    },
-    "ant_hr_dfa": {
-        "unit": "bpm", "direction": "higher_is_better",
-        "note": f"Anaerobní práh z DFA-alpha1 = {DFA_ANT_THRESHOLD}.",
     },
     "resp_rate_rsa": {
         "unit": "dechů/min", "direction": "neutral",
@@ -750,11 +776,6 @@ METRIC_META: dict[str, dict] = {
         "unit": "%", "direction": "higher_is_better",
         "note": "Jak moc HRV přispívá ke Garminovu readiness skóre. Diagnostika "
                 "pro případ, kdy se naše a Garminovo skóre rozcházejí. Až od 8/2025.",
-    },
-    "tati_score": {
-        "unit": "bpm·min", "direction": "neutral",
-        "note": "Time Above Threshold Impulse – akumulovaná práce nad Critical HR "
-                "(Monod-Scherrer adaptovaný na tep).",
     },
     "hr_curve": {
         "unit": "bpm", "direction": "higher_is_better",

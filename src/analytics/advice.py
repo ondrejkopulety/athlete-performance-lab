@@ -22,8 +22,12 @@ from config.settings import (
     SHORT_SLEEP_MINUTES,
 )
 
-STRAIN_HIGH = 800
-STRAIN_MODERATE = 400
+# Prahy přeškálované poté, co se strain začal počítat z NEOŘEZANÉ monotonie
+# (viz quality.compute_monotony_strain). Dřív 400/800 při monotonii ≤ 4.0;
+# teď se strain běžně pohybuje výš (medián ~300, monotónní high-load týdny
+# přes 1500).
+STRAIN_HIGH = 1500
+STRAIN_MODERATE = 800
 ACWR_DANGER = 1.5
 ACWR_ELEVATED = 1.3
 
